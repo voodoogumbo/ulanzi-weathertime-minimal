@@ -1,0 +1,34 @@
+# TC001 Enhanced Clock - Git Ignore File
+# 
+# SECURITY: Protect sensitive configuration files from being committed
+
+# Real configuration file with credentials (NEVER COMMIT THIS)
+config.h
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Build artifacts
+*.hex
+*.bin
+*.elf
+
+# Arduino IDE
+*.autosave

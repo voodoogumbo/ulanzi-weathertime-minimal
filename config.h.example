@@ -1,0 +1,40 @@
+/*
+  config.h.example - Template configuration file for TC001 Enhanced Clock
+  
+  SETUP INSTRUCTIONS:
+  1. Copy this file to 'config.h' in the same directory
+  2. Fill in your actual values below
+  3. Never commit the real config.h file to public repositories!
+  
+  MQTT Topics (automatically created):
+  - {MQTT_BASE}/notify      - Show notification: {"text":"Hello", "color":"FF0000", "duration":5}
+  - {MQTT_BASE}/page        - Change page: {"page":"clock|calendar|weather"}
+  - {MQTT_BASE}/brightness  - Set brightness: {"brightness":50}
+  - {MQTT_BASE}/auto_brightness - Toggle auto: {"enabled":true}
+  - {MQTT_BASE}/config      - Runtime config: {"page_duration":10, "rotation_enabled":true}
+  - {MQTT_BASE}/weather     - Force weather update: {}
+*/
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
+/*********** WIFI CONFIGURATION ***********/
+// Your WiFi network credentials
+const char* WIFI_SSID     = "YourWiFiNetworkName";
+const char* WIFI_PASSWORD = "YourWiFiPassword";
+
+/*********** MQTT CONFIGURATION ***********/
+// MQTT broker settings - typically a local server like Home Assistant
+const char* MQTT_HOST = "192.168.1.100";      // Your MQTT broker IP address
+const uint16_t MQTT_PORT = 1883;              // Standard MQTT port
+const char* MQTT_BASE = "tc001";              // Base topic for all MQTT messages
+
+/*********** OPENWEATHER API CONFIGURATION ***********/
+// Get your free API key from: https://openweathermap.org/api
+const char* OPENWEATHER_API_KEY = "your_openweather_api_key_here";
+
+// Your location coordinates (get from https://www.latlong.net/)
+const char* OPENWEATHER_LAT = "40.7128";      // Example: New York City latitude
+const char* OPENWEATHER_LON = "-74.0060";     // Example: New York City longitude
+
+#endif // CONFIG_H

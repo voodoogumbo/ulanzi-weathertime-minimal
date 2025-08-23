@@ -2,6 +2,17 @@
 
 A complete, feature-rich smart clock firmware for the TC001 32x8 LED matrix device with AWTRIX-style display, weather integration, and robust MQTT control.
 
+## 🚀 **Latest Enhancements**
+- 🐕 **LaMetric Watchdog Boot Icon**: Professional startup icon in LaMetric orange
+- 🌡️ **Dynamic Temperature Colors**: Gradient scaling from white (0°F) to red (100°F+)
+- 🌙 **Ultra-Dim Night Mode**: Brightness drops to 1 after 10pm for bedroom use
+- ⚡ **Performance Optimized**: NTP removed, MQTT-only time sync for faster operation
+- 🛡️ **Rock-Solid Stability**: 30-second watchdog timer prevents reboots
+- 🕐 **MQTT Time Sync**: Unix timestamp-based time with automatic Mountain Time/DST
+- ☁️ **3D Cloud Gradients**: Sophisticated 5-row cloud shading with realistic depth
+- 🔍 **Time Source Indicator**: Green pixel = MQTT time active
+- 📦 **Condensed Code**: 192 lines removed, optimized for maintainability
+
 [![Arduino](https://img.shields.io/badge/Arduino-ESP32-blue.svg)](https://www.arduino.cc/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-ESP32-red.svg)](https://espressif.com/en/products/socs/esp32)
@@ -12,31 +23,38 @@ A complete, feature-rich smart clock firmware for the TC001 32x8 LED matrix devi
 - **32x8 LED Matrix**: Full-width AWTRIX TMODE5-style clock display
 - **Optimized Time Display**: Perfect pixel spacing, no text overflow
 - **Enhanced Colon**: Two separate 2x2 blocks with clean blinking animation
-- **Page Rotation**: Clock → Calendar → Weather (configurable timing)
-- **Night Mode**: Automatic red display + dimmed brightness after 22:00
+- **Page Rotation**: Clock → Weather (configurable timing)
+- **Ultra-Dim Night Mode**: Automatic red display + brightness = 1 after 22:00 (10pm)
+- **LaMetric Watchdog Boot**: Professional startup icon in signature orange
 
 ### 🌤️ **Smart Weather Integration**
 - **OpenWeather API**: Real-time weather data with 15-minute updates
 - **Day/Night Icons**: Intelligent sun/moon switching based on API data
-- **Custom Color Scheme**: Unique colors for each weather condition
-  - ☀️ **Sun**: Golden yellow (`#FFC800`)
-  - 🌙 **Moon**: Silver-blue (`#C8DCFF`) 
-  - ☁️ **Clouds**: Light gray (`#B4B4B4`)
-  - 🌧️ **Rain**: Deep blue (`#0078FF`)
-  - ❄️ **Snow**: Pure white (`#FFFFFF`)
-  - ⛈️ **Thunderstorm**: Electric purple (`#9600FF`)
+- **3D Cloud Gradients**: Revolutionary 5-row gradient system with realistic atmospheric depth
+  - **Row 5 (bottom)**: Dark gray shadow base
+  - **Row 4**: Medium gray with dark right edge (shadow transition)
+  - **Row 3**: Light gray with medium right edge (highlight transition)
+  - **Rows 2 & 1**: Bright highlight (sunlit cloud top)
+- **Temperature Color Scaling**: Dynamic color gradient from white (0°F) to red (100°F+)
+- **Weather Icon Colors**: Unique colors for each weather condition
+  - ☀️ **Sun**: Golden yellow - ☁️ **3D Clouds**: Multi-gray gradient
+  - 🌙 **Moon**: Silver-blue - 🌧️ **Rain**: Deep blue 
+  - ❄️ **Snow**: Pure white - ⛈️ **Thunderstorm**: Electric purple
 
 ### 📡 **Advanced MQTT Control**
-- **Real-time Commands**: Instant response to MQTT messages
-- **Comprehensive Topics**: Full device control via MQTT
+- **MQTT Time Sync**: Unix timestamp-based time with automatic Mountain Time/DST conversion
+- **Performance Optimized**: NTP removed for faster, more reliable operation
+- **Lightning-Fast Response**: Instant MQTT processing with consolidated topic routing
+- **Visual Time Indicator**: Green pixel shows active MQTT time source
+- **Comprehensive Topics**: Full device control via MQTT (`/time`, `/notify`, `/weather`, etc.)
 - **Enhanced Debugging**: Detailed logging with hex dump analysis
-- **Automatic JSON Repair**: Fixes common transmission issues
 
 ### 🔧 **Robust Architecture**
 - **Dual-Core FreeRTOS**: Dedicated cores for display and networking
-- **Enhanced Watchdog**: 15-second timeout with strategic feed points
+- **Ultra-Stable Watchdog**: 30-second timeout for maximum stability
 - **Network Stability**: Bulletproof WiFi/MQTT reconnection logic
 - **Mountain Time**: Automatic DST handling with timezone accuracy
+- **Optimized Code**: 1161 lines (192 lines removed), cleaner and more maintainable
 
 ## 🛠️ Hardware Requirements
 
@@ -66,16 +84,23 @@ const char* OPENWEATHER_LAT = "40.7128";      // Your latitude
 const char* OPENWEATHER_LON = "-74.0060";     // Your longitude
 ```
 
-### 3. **Install Dependencies**
+### 3. **Setup MQTT Time Source**
+**IMPORTANT**: This clock requires MQTT time sync (NTP removed for performance)
+1. Install Python requirements: `pip install paho-mqtt`
+2. Edit `mqtt_time_publisher.py` with your MQTT broker settings
+3. Run continuously: `python3 mqtt_time_publisher.py`
+
+### 4. **Install Dependencies**
 In Arduino IDE, install these libraries:
 - `FastLED` by Daniel Garcia
 - `PubSubClient` by Nick O'Leary  
 - `ArduinoJson` by Benoit Blanchon
 
-### 4. **Upload Firmware**
+### 5. **Upload Firmware**
 1. Open `TC001_Enhanced_SingleFile.ino` in Arduino IDE
 2. Select **ESP32 Dev Module** board
 3. Upload to your TC001 device
+4. Watch for LaMetric watchdog boot icon and green time indicator!
 
 ## 📋 API Setup Guides
 
@@ -138,6 +163,22 @@ mosquitto_pub -h YOUR_BROKER -t "tc001/config" -m '{"weather_update_minutes":30}
 mosquitto_pub -h YOUR_BROKER -t "tc001/weather" -m '{}'
 ```
 
+### 🕐 **Time Synchronization**
+```bash
+# Send Unix timestamp for time sync (replaces NTP)
+mosquitto_pub -h YOUR_BROKER -t "tc001/time" -m '{"unix_time":1640995200}'
+
+# Or use the included Python script for continuous time publishing
+python3 mqtt_time_publisher.py
+```
+
+**Python Time Publisher Setup:**
+1. Install requirements: `pip install paho-mqtt`
+2. Edit `mqtt_time_publisher.py` to match your MQTT broker settings
+3. Run continuously: `python3 mqtt_time_publisher.py`
+4. The script publishes Unix timestamps every 60 seconds
+5. Clock will show green pixel (bottom right) when using MQTT time vs blue for NTP
+
 ## 🏠 Home Assistant Integration
 
 Add to your `configuration.yaml`:
@@ -172,17 +213,17 @@ script:
 ## 🐛 Troubleshooting
 
 ### **MQTT JSON Parse Errors**
-The firmware includes automatic JSON repair for common issues:
+The firmware uses fast, strict JSON parsing for maximum responsiveness:
 ```
 ❌ MQTT JSON parse error: InvalidInput
-🔧 Attempting to fix JSON: '{"text":"Test from PC"}'
-✅ JSON fixed and parsed successfully!
+📝 Failed payload: '{"text":"Test from PC"}'
 ```
 
 **Common Fixes:**
-- Ensure proper JSON formatting with quoted keys
+- Ensure proper JSON formatting with quoted keys: `{"text":"message"}`
 - Check for hidden characters (use hex dump in logs)
 - Verify MQTT broker settings
+- Test with simple payloads first: `{"text":"hello"}`
 
 ### **Weather Not Updating**
 1. Verify API key is valid and active

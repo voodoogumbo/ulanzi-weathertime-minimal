@@ -1,36 +1,10 @@
 /*
-  TC001_Enhanced_SingleFile.ino — Complete Enhanced Clock in Single File
+  TC001 Enhanced Clock - Complete single-file firmware
+  Features: AWTRIX-style display, MQTT time sync, weather integration, 
+  cloud gradients, dual-core FreeRTOS, Mountain Time DST support
   
-  🔧 SETUP INSTRUCTIONS:
-    1. Copy config.h.example to config.h
-    2. Fill in your WiFi credentials, MQTT broker, and OpenWeather API key
-    3. Upload to your TC001 device
-  
-  ⭐ Features:
-    - 32x8 LED matrix with AWTRIX TMODE5-style clock display
-    - Improved colon separators (two separate 2x2 blocks)
-    - Full 32-pixel width time display with optimized spacing
-    - Enhanced temperature display with custom color scheme
-    - Page rotation: Clock → Calendar → Weather
-    - Night mode: after 22:00 local, brightness = 8 and text turns red
-    - Smart weather icons with day/night variants (moon for clear nights)
-    - MQTT listener with comprehensive command support
-    - OpenWeather API integration with custom colored 8x8 weather icons
-    - Mountain Time Zone with bulletproof DST support
-    - Dual-core FreeRTOS architecture with robust watchdog management
-    - Enhanced error handling and network stability
-  
-  📡 MQTT Topics (replace 'tc001' with your MQTT_BASE):
-    - tc001/notify        - Show notification
-    - tc001/page          - Change display page  
-    - tc001/brightness    - Manual brightness control
-    - tc001/auto_brightness - Toggle auto-brightness
-    - tc001/config        - Runtime configuration
-    - tc001/weather       - Force weather update
-  
-  🔐 SECURITY NOTE:
-    Never commit config.h to public repositories! It contains sensitive credentials.
-    Always use config.h.example as your template and keep config.h private.
+  Setup: Copy config.h.example → config.h, configure, upload
+  MQTT Topics: notify, page, brightness, auto_brightness, config, weather, time
 */
 
 #include <WiFi.h>
@@ -42,13 +16,7 @@
 #include <esp_task_wdt.h>
 #include "config.h"  // User configuration (WiFi, MQTT, OpenWeather API)
 
-/*********** 
-  USER CONFIGURATION: 
-  All user settings (WiFi, MQTT, OpenWeather API) are now in config.h
-  Copy config.h.example to config.h and customize for your setup.
-***********/
-
-/*********** HARDWARE CONFIGURATION ***********/
+// Hardware Configuration
 // LED Matrix Configuration
 static const uint8_t MW = 32;              // Matrix width
 static const uint8_t MH = 8;               // Matrix height
@@ -84,7 +52,7 @@ static const int GAP = 1;          // Spacing between elements
 // Temperature Display Layout
 static const int DIGIT_SPACING = 8;  // 6px glyph + 2px gap for readability
 
-/*********** FONT DATA STRUCTURES ***********/
+// Font Data
 struct LargeGlyph { uint8_t rows[7]; uint8_t w; };
 struct SmallGlyph { uint8_t rows[5]; uint8_t w; };
 struct SmallDigit { uint8_t rows[5]; uint8_t w; };
@@ -157,7 +125,7 @@ PROGMEM static const SmallDigit SMALL_DIGITS[10] = {
   {{0b111,0b101,0b111,0b001,0b111},3}  // 9
 };
 
-// Weather icons for different conditions
+// Weather icons for different conditions + Watchdog boot icon
 PROGMEM static const uint8_t WEATHER_ICONS[][8] = {
   // Clear sky (sun)
   {0b00011000,0b01111110,0b11111111,0b11111111,0b11111111,0b11111111,0b01111110,0b00011000},
@@ -170,7 +138,9 @@ PROGMEM static const uint8_t WEATHER_ICONS[][8] = {
   // Thunderstorm
   {0b00111100,0b01111110,0b11111111,0b01111110,0b00010000,0b00110000,0b01100000,0b11000000},
   // Clear night (crescent moon)
-  {0b00011000,0b00111000,0b01111000,0b01111000,0b01111000,0b01111000,0b00111000,0b00011000}
+  {0b00011000,0b00111000,0b01111000,0b01111000,0b01111000,0b01111000,0b00111000,0b00011000},
+  // Watchdog icon (index 6) - LaMetric style dog face
+  {0b01100110,0b11111111,0b11011011,0b11111111,0b11111111,0b01111110,0b01011010,0b00111100}
 };
 
 // Month abbreviations for calendar display
@@ -179,7 +149,7 @@ const char* const MONTH_NAMES[12] PROGMEM = {
   "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
 };
 
-/*********** GLOBAL STATE ***********/
+// Global State
 // Network clients
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -214,6 +184,12 @@ uint8_t manualBrightness = 24;
 uint8_t currentBrightness = 24;
 unsigned long lastAmbientReadMs = 0;
 
+// MQTT Time Management
+bool mqttTimeAvailable = false;
+time_t mqttUnixTime = 0;
+unsigned long mqttTimeMs = 0;
+bool useMqttTime = true;
+
 // FreeRTOS task handles
 TaskHandle_t renderTaskHandle = NULL;
 TaskHandle_t networkTaskHandle = NULL;
@@ -222,7 +198,7 @@ SemaphoreHandle_t displayMutex = NULL;
 // Watchdog state
 bool wdt_added = false;
 
-/*********** DISPLAY UTILITIES ***********/
+// Display Utilities
 // TC001 uses serpentine matrix wiring - coordinate mapping
 inline uint16_t XY(uint8_t x, uint8_t y) {
   if (y & 0x01) {
@@ -249,12 +225,11 @@ bool isNight(const struct tm& timeinfo) {
   return (timeinfo.tm_hour >= 22 || timeinfo.tm_hour < 6);
 }
 
-/*********** FONT RENDERING ***********/
-// Draw large glyph with bold effect (AWTRIX-style) - horizontal dilation
-void drawLargeGlyphBold(uint8_t digitIndex, int x, int y, const CRGB& c) {
-  if (digitIndex >= 10) return; // bounds check
+// Font Rendering
+// Draw large glyph (6x7 font) with optional bold effect
+void drawLargeGlyph(uint8_t digitIndex, int x, int y, const CRGB& c, bool bold = false) {
+  if (digitIndex >= 10) return;
   
-  // Safely read PROGMEM data
   LargeGlyph g;
   memcpy_P(&g, &LARGE_DIGITS[digitIndex], sizeof(LargeGlyph));
   
@@ -262,26 +237,8 @@ void drawLargeGlyphBold(uint8_t digitIndex, int x, int y, const CRGB& c) {
     uint8_t row = g.rows[ry];
     for (uint8_t rx = 0; rx < g.w; ++rx) {
       bool on = row & (1 << (5 - rx));
-      bool left_on = (rx > 0) && (row & (1 << (5 - (rx - 1))));
+      bool left_on = bold && (rx > 0) && (row & (1 << (5 - (rx - 1))));
       if (on || left_on) {
-        pset(x + rx, y + ry, c);
-      }
-    }
-  }
-}
-
-// Draw large glyph (6x7 font) - safely read from PROGMEM
-void drawLargeGlyph(uint8_t digitIndex, int x, int y, const CRGB& c) {
-  if (digitIndex >= 10) return; // bounds check
-  
-  // Safely read PROGMEM data
-  LargeGlyph g;
-  memcpy_P(&g, &LARGE_DIGITS[digitIndex], sizeof(LargeGlyph));
-  
-  for (uint8_t ry = 0; ry < 7; ++ry) {
-    uint8_t row = g.rows[ry];
-    for (uint8_t rx = 0; rx < g.w; ++rx) {
-      if (row & (1 << (5 - rx))) {
         pset(x + rx, y + ry, c);
       }
     }
@@ -366,21 +323,92 @@ void drawBigColon(int x, int y, const CRGB& c) {
   pset(x,   y+5, c); pset(x+1, y+5, c);
 }
 
-// Draw weather icon (8x8 pixels)
+// Draw weather icon (8x8 pixels) with sophisticated cloud gradient
 void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
-  if (iconIndex >= 6) return; // bounds check
+  if (iconIndex >= 7) return; // bounds check
   
-  for (uint8_t ry = 0; ry < 8; ++ry) {
-    uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
-    for (uint8_t rx = 0; rx < 8; ++rx) {
-      if (row & (1 << (7 - rx))) {
-        pset(x + rx, y + ry, c);
+  // Special sophisticated gradient for cloudy weather (index 1)
+  if (iconIndex == 1) {
+    // Define gradient colors for natural cloud depth
+    CRGB darkGray = CRGB(60, 60, 60);        // Bottom shadow
+    CRGB lighterGray = CRGB(120, 120, 120);  // Mid-tone
+    CRGB evenLighterGray = CRGB(200, 200, 200); // Top highlight
+    
+    for (uint8_t ry = 0; ry < 8; ++ry) {
+      uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
+      for (uint8_t rx = 0; rx < 8; ++rx) {
+        if (row & (1 << (7 - rx))) {
+          CRGB pixelColor;
+          
+          // Apply sophisticated 5-row gradient (cloud spans rows 1-5)
+          if (ry == 1) {
+            // Row 1 (top): Top highlight - brightest
+            pixelColor = evenLighterGray;
+          } else if (ry == 2) {
+            // Row 2: Light gray + rightmost pixel highlight
+            if (rx == 7) {
+              pixelColor = evenLighterGray; // Right edge highlight
+            } else {
+              pixelColor = CRGB(180, 180, 180); // Light gray
+            }
+          } else if (ry == 3) {
+            // Row 3: Light gray + rightmost pixel transition
+            if (rx == 7) {
+              pixelColor = lighterGray; // Right edge transition
+            } else {
+              pixelColor = CRGB(180, 180, 180); // Light gray
+            }
+          } else if (ry == 4) {
+            // Row 4: Medium gray + rightmost pixel shadow
+            if (rx == 7) {
+              pixelColor = darkGray; // Right edge shadow
+            } else {
+              pixelColor = lighterGray;
+            }
+          } else if (ry == 5) {
+            // Row 5 (bottom): Dark gray shadow base
+            pixelColor = darkGray;
+          } else {
+            // Any other rows (0, 6, 7): Use original color if present
+            pixelColor = c;
+          }
+          
+          pset(x + rx, y + ry, pixelColor);
+        }
+      }
+    }
+  } else {
+    // Draw other icons normally
+    for (uint8_t ry = 0; ry < 8; ++ry) {
+      uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
+      for (uint8_t rx = 0; rx < 8; ++rx) {
+        if (row & (1 << (7 - rx))) {
+          pset(x + rx, y + ry, c);
+        }
       }
     }
   }
 }
 
-/*********** BRIGHTNESS CONTROL ***********/
+// Draw watchdog boot icon (LaMetric style)
+void drawWatchdogBootIcon() {
+  clearAll();
+  
+  // Display watchdog icon (index 6) in LaMetric orange
+  CRGB laMetricOrange = CRGB(255, 140, 0); // LaMetric signature orange
+  drawWeatherIcon(6, 12, 0, laMetricOrange); // Centered on 32x8 display
+  
+  FastLED.setBrightness(80); // Bright for boot message
+  FastLED.show();
+  
+  // Display for 2 seconds
+  delay(2000);
+  
+  // Feed watchdog during display
+  if (wdt_added) esp_task_wdt_reset();
+}
+
+// Brightness Control
 // Read ambient sensor and map to brightness value
 uint8_t readAmbientBrightness() {
   uint16_t ambientReading = analogRead(AMBIENT_SENSOR_PIN);
@@ -403,41 +431,62 @@ uint8_t readAmbientBrightness() {
   return constrain(brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX);
 }
 
-// Update display brightness based on ambient sensor and time
+// Update display brightness based on ambient sensor only
 void updateBrightness() {
   if (autoBrightnessEnabled) {
     currentBrightness = readAmbientBrightness();
   } else {
     currentBrightness = manualBrightness;
   }
-  
-  // Apply night mode override if enabled
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    if (isNight(timeinfo)) {
-      static bool night_mode_logged = false;
-      if (!night_mode_logged) {
-        Serial.printf("Night mode active (%02d:%02d), brightness forced to 8\n", timeinfo.tm_hour, timeinfo.tm_min);
-        night_mode_logged = true;
-      }
-      currentBrightness = 8; // Override with night mode brightness for visibility
-    } else {
-      static bool night_mode_logged = false;
-      night_mode_logged = false;
-    }
-  }
+  // Note: Time-based night mode affects text COLOR only, not LED brightness
+  // Night mode color logic is handled in individual display functions
 }
 
 /*********** PAGE RENDERING ***********/
+// Get current time - MQTT time only (NTP removed for performance)
+bool getCurrentTime(struct tm* timeinfo, bool* usingMqttTime) {
+  *usingMqttTime = false;
+  
+  // Check if MQTT time is available and recent (within last 5 minutes)
+  if (useMqttTime && mqttTimeAvailable && 
+      (millis() - mqttTimeMs) < 300000) {  // 5 minutes = 300000ms
+    
+    // Calculate current time based on MQTT timestamp + elapsed time
+    time_t currentTime = mqttUnixTime + ((millis() - mqttTimeMs) / 1000);
+    
+    // Convert to local time (timezone already set during setup)
+    localtime_r(&currentTime, timeinfo);
+    
+    // Debug time calculation every minute
+    static int lastDebugMinute = -1;
+    if (timeinfo->tm_min != lastDebugMinute) {
+      struct tm utc_tm;
+      gmtime_r(&currentTime, &utc_tm);
+      Serial.printf("Time Debug - UTC: %02d:%02d, Local: %02d:%02d, Night Mode: %s\n",
+                    utc_tm.tm_hour, utc_tm.tm_min,
+                    timeinfo->tm_hour, timeinfo->tm_min,
+                    isNight(*timeinfo) ? "YES" : "NO");
+      lastDebugMinute = timeinfo->tm_min;
+    }
+    
+    *usingMqttTime = true;
+    return true;
+  }
+  
+  // No time available - MQTT time required
+  return false;
+}
+
 // Draw main clock page with full-width AWTRIX TMODE5 style
 void drawClock() {
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    // Time not synced yet, show visible sync message
+  bool usingMqttTime;
+  if (!getCurrentTime(&timeinfo, &usingMqttTime)) {
+    // No MQTT time available, show error message
     clearAll();
     CRGB col = COLOR_DAY;
     FastLED.setBrightness(currentBrightness);
-    drawSmallString("SYNC", 10, 2, col);
+    drawSmallString("NO TIME", 6, 2, col);
     return;
   }
 
@@ -468,9 +517,9 @@ void drawClock() {
   int y = 0;  // start at top
 
   // Draw HH with bold digits
-  drawLargeGlyphBold(hour / 10, x, y, col);     
+  drawLargeGlyph(hour / 10, x, y, col, true);     
   x += DIGIT_W + GAP;
-  drawLargeGlyphBold(hour % 10, x, y, col);     
+  drawLargeGlyph(hour % 10, x, y, col, true);     
   x += DIGIT_W + GAP;
 
   // Draw big colon (blinking) - 2x2 dot blocks
@@ -480,15 +529,23 @@ void drawClock() {
   x += COLON_W + GAP;
 
   // Draw MM with bold digits
-  drawLargeGlyphBold(minute / 10, x, y, col);   
+  drawLargeGlyph(minute / 10, x, y, col, true);   
   x += DIGIT_W + GAP;
-  drawLargeGlyphBold(minute % 10, x, y, col);
+  drawLargeGlyph(minute % 10, x, y, col, true);
+  
+  // Add subtle time source indicator in bottom right corner
+  if (usingMqttTime) {
+    pset(31, 7, CRGB(0, 255, 0)); // Green pixel for MQTT time
+  } else {
+    pset(31, 7, CRGB(0, 100, 255)); // Blue pixel for NTP time
+  }
 }
 
 // Draw calendar page with month and date
 void drawCalendar() {
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
+  bool usingMqttTime;
+  if (!getCurrentTime(&timeinfo, &usingMqttTime)) {
     return;
   }
 
@@ -521,41 +578,81 @@ void drawCalendar() {
 
 // Draw weather page with temperature and icon
 void drawWeather() {
-  CRGB col = COLOR_DAY; // Weather page always uses day colors
+  struct tm timeinfo;
+  bool usingMqttTime;
+  if (!getCurrentTime(&timeinfo, &usingMqttTime)) {
+    // No MQTT time available, show error message
+    clearAll();
+    CRGB col = COLOR_DAY;
+    FastLED.setBrightness(currentBrightness);
+    drawSmallString("NO TIME", 6, 2, col);
+    return;
+  }
+
+  CRGB col = isNight(timeinfo) ? COLOR_NIGHT : COLOR_DAY;
   FastLED.setBrightness(currentBrightness);
 
   clearAll();
 
-  // Draw temperature with improved spacing for better readability
+  // Draw temperature with color scaling from white (0°F) to red (100°F+)
   int temp = (int)round(temperature);
+  
+  // Calculate temperature color: white at 0°F, red at 100°F+
+  CRGB tempColor;
+  
+  // Override with night mode color during 22:00-06:00
+  if (isNight(timeinfo)) {
+    tempColor = COLOR_NIGHT; // Force red during night hours
+    static bool nightModeLogged = false;
+    if (!nightModeLogged) {
+      Serial.printf("NIGHT MODE TRIGGERED: Temperature forced to red at %02d:%02d\n", 
+                    timeinfo.tm_hour, timeinfo.tm_min);
+      nightModeLogged = true;
+    }
+  } else {
+    static bool nightModeLogged = false;
+    nightModeLogged = false; // Reset for next night
+    if (temp <= 0) {
+      tempColor = CRGB(255, 255, 255); // White for 0 and below
+    } else if (temp >= 100) {
+      tempColor = CRGB(255, 0, 0); // Pure red for 100+ degrees
+    } else {
+      // Smooth transition from white to red based on temperature
+      // At 0°F: (255, 255, 255) -> At 100°F: (255, 0, 0)
+      uint8_t red = 255;
+      uint8_t green = map(temp, 0, 100, 255, 0); // Green decreases as temp increases
+      uint8_t blue = map(temp, 0, 100, 255, 0);  // Blue decreases as temp increases
+      tempColor = CRGB(red, green, blue);
+    }
+  }
   
   // Use large 6x7 digits for temperature with better spacing
   int x = 1;
   int y = 1;
   
-  // Draw temperature digits with improved spacing
+  // Draw temperature digits with color scaling
   if (temp >= 100) {
     // Three digits (100+) - rare but handle gracefully
-    drawLargeGlyphBold(temp / 100, x, y, col);
+    drawLargeGlyph(temp / 100, x, y, tempColor, true);
     x += DIGIT_SPACING;
-    drawLargeGlyphBold((temp / 10) % 10, x, y, col);
+    drawLargeGlyph((temp / 10) % 10, x, y, tempColor, true);
     x += DIGIT_SPACING;
-    drawLargeGlyphBold(temp % 10, x, y, col);
+    drawLargeGlyph(temp % 10, x, y, tempColor, true);
     x += 6;  // Final digit width only
   } else if (temp >= 10) {
     // Two digits (10-99) - most common case
-    drawLargeGlyphBold(temp / 10, x, y, col);
+    drawLargeGlyph(temp / 10, x, y, tempColor, true);
     x += DIGIT_SPACING;
-    drawLargeGlyphBold(temp % 10, x, y, col);
+    drawLargeGlyph(temp % 10, x, y, tempColor, true);
     x += 6;  // Final digit width only
   } else {
     // Single digit (0-9)
-    drawLargeGlyphBold(temp, x, y, col);
+    drawLargeGlyph(temp, x, y, tempColor, true);
     x += 6;  // Final digit width only
   }
   
-  // Draw degree symbol with better positioning (top-aligned)
-  drawLargeDegree(x + 1, y, col);  // Start at y position, +1px spacing from digits
+  // Draw degree symbol with same color as temperature
+  drawLargeDegree(x + 1, y, tempColor);  // Start at y position, +1px spacing from digits
   
   // Draw weather icon on right side with custom color scheme
   uint8_t iconIndex = 1; // Default to clouds
@@ -600,42 +697,8 @@ void drawNotify() {
   drawSmallString(notifyText, 2, 2, notifyColor);
 }
 
-/*********** TIME MANAGEMENT ***********/
-// Setup NTP time synchronization with bulletproof timezone handling
-void setupTime() {
-  Serial.printf("Contacting NTP servers: pool.ntp.org, time.nist.gov");
-  unsigned long startTime = millis();
-  
-  // Use ESP32 native timezone configuration with configTzTime
-  const char* TZ_DENVER = "MST7MDT,M3.2.0/2,M11.1.0/2";  // Mountain Time with DST rules
-  configTzTime(TZ_DENVER, "pool.ntp.org", "time.nist.gov");
-  
-  // Wait up to 10 seconds for time sync with watchdog resets
-  struct tm timeinfo;
-  while (!getLocalTime(&timeinfo) && (millis() - startTime) < 10000) {
-    if (wdt_added) esp_task_wdt_reset();  // Feed watchdog during NTP sync
-    delay(500);
-    Serial.print(".");
-  }
-  
-  if (!getLocalTime(&timeinfo)) {
-    Serial.printf(" ❌ NTP sync failed after %lu ms! Clock will show 'SYNC' until sync completes.\n", millis() - startTime);
-    Serial.println("Note: NTP will continue trying in background.");
-  } else {
-    // Get UTC time for comparison
-    time_t now = time(nullptr);
-    struct tm utc_tm;
-    gmtime_r(&now, &utc_tm);
-    
-    const char* dst_status = timeinfo.tm_isdst > 0 ? "MDT (UTC-6)" : timeinfo.tm_isdst == 0 ? "MST (UTC-7)" : "Unknown";
-    Serial.printf(" ✅ NTP sync success! (%lu ms)\n", millis() - startTime);
-    Serial.printf("    UTC Time: %02d:%02d:%02d\n", utc_tm.tm_hour, utc_tm.tm_min, utc_tm.tm_sec);
-    Serial.printf("    Local Time: %02d:%02d:%02d %s\n", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, dst_status);
-    Serial.printf("    DST Active: %s\n", timeinfo.tm_isdst ? "Yes" : "No");
-  }
-}
 
-/*********** WIFI MANAGEMENT ***********/
+// WiFi Management
 // Ensure WiFi connection with shorter timeout for dual-core stability
 void ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
@@ -663,7 +726,7 @@ void ensureWifi() {
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
-/*********** WEATHER API ***********/
+// Weather API
 // Fetch weather data from OpenWeather API with enhanced timeouts
 void fetchWeatherData() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -706,7 +769,7 @@ void fetchWeatherData() {
   http.end();
 }
 
-/*********** MQTT COMMAND HANDLERS ***********/
+// MQTT Command Handlers
 // Handle notification display command
 void handleNotify(const JsonDocument& doc) {
   notifyText = doc["text"].as<const char*>();
@@ -722,7 +785,6 @@ void handleNotify(const JsonDocument& doc) {
 void handlePageCommand(const JsonDocument& doc) {
   String page = doc["page"].as<String>();
   if (page == "clock") currentPage = PAGE_CLOCK;
-  else if (page == "calendar") currentPage = PAGE_CALENDAR;
   else if (page == "weather") currentPage = PAGE_WEATHER;
   // Page timer is now handled locally by render task
 }
@@ -755,8 +817,31 @@ void handleConfig(const JsonDocument& doc) {
   }
 }
 
-/*********** MQTT MANAGEMENT ***********/
-// Ensure MQTT connection and subscribe to all topics
+// Handle MQTT time updates with Unix timestamps
+void handleTimeCommand(const JsonDocument& doc) {
+  if (doc.containsKey("unix_time")) {
+    mqttUnixTime = doc["unix_time"].as<time_t>();
+    mqttTimeMs = millis();
+    mqttTimeAvailable = true;
+    Serial.printf("MQTT time received: %lu (Unix timestamp)\n", mqttUnixTime);
+  }
+}
+
+// MQTT Management
+// Helper function to subscribe to a topic
+bool mqttSubscribe(const char* suffix, bool& allSubscribed) {
+  char topic[128];
+  snprintf(topic, 128, "%s%s", MQTT_BASE, suffix);
+  if (mqtt.subscribe(topic)) {
+    Serial.printf("✅ Subscribed to: %s\n", topic);
+    return true;
+  } else {
+    Serial.printf("❌ Failed to subscribe to: %s\n", topic);
+    allSubscribed = false;
+    return false;
+  }
+}
+
 void ensureMqtt() {
   if (mqtt.connected()) return;
   
@@ -772,62 +857,18 @@ void ensureMqtt() {
   if (mqtt.connect(cid)) {
     Serial.println("🎉 MQTT CONNECTED SUCCESSFULLY!");
     
-    char topic[128];
     bool allSubscribed = true;
     
-    // Feed watchdog during subscription process
+    // Subscribe to all topics using helper function
     if (wdt_added) esp_task_wdt_reset();
-    
-    snprintf(topic, 128, "%s/notify", MQTT_BASE);
-    if (mqtt.subscribe(topic)) {
-      Serial.printf("✅ Subscribed to: %s\n", topic);
-    } else {
-      Serial.printf("❌ Failed to subscribe to: %s\n", topic);
-      allSubscribed = false;
-    }
-    
-    snprintf(topic, 128, "%s/page", MQTT_BASE);
-    if (mqtt.subscribe(topic)) {
-      Serial.printf("✅ Subscribed to: %s\n", topic);
-    } else {
-      Serial.printf("❌ Failed to subscribe to: %s\n", topic);
-      allSubscribed = false;
-    }
-    
-    snprintf(topic, 128, "%s/brightness", MQTT_BASE);
-    if (mqtt.subscribe(topic)) {
-      Serial.printf("✅ Subscribed to: %s\n", topic);
-    } else {
-      Serial.printf("❌ Failed to subscribe to: %s\n", topic);
-      allSubscribed = false;
-    }
-    
-    // Feed watchdog mid-way through subscriptions
+    mqttSubscribe("/notify", allSubscribed);
+    mqttSubscribe("/page", allSubscribed);
+    mqttSubscribe("/brightness", allSubscribed);
+    mqttSubscribe("/auto_brightness", allSubscribed);
     if (wdt_added) esp_task_wdt_reset();
-    
-    snprintf(topic, 128, "%s/auto_brightness", MQTT_BASE);
-    if (mqtt.subscribe(topic)) {
-      Serial.printf("✅ Subscribed to: %s\n", topic);
-    } else {
-      Serial.printf("❌ Failed to subscribe to: %s\n", topic);
-      allSubscribed = false;
-    }
-    
-    snprintf(topic, 128, "%s/config", MQTT_BASE);
-    if (mqtt.subscribe(topic)) {
-      Serial.printf("✅ Subscribed to: %s\n", topic);
-    } else {
-      Serial.printf("❌ Failed to subscribe to: %s\n", topic);
-      allSubscribed = false;
-    }
-    
-    snprintf(topic, 128, "%s/weather", MQTT_BASE);
-    if (mqtt.subscribe(topic)) {
-      Serial.printf("✅ Subscribed to: %s\n", topic);
-    } else {
-      Serial.printf("❌ Failed to subscribe to: %s\n", topic);
-      allSubscribed = false;
-    }
+    mqttSubscribe("/config", allSubscribed);
+    mqttSubscribe("/weather", allSubscribed);
+    mqttSubscribe("/time", allSubscribed);
     
     if (allSubscribed) {
       Serial.println("🔥 ALL MQTT SUBSCRIPTIONS SUCCESSFUL - Ready for messages!");
@@ -846,6 +887,9 @@ void ensureMqtt() {
 
 // MQTT message callback - routes to appropriate handlers
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
+  // Feed watchdog at start of MQTT callback to prevent timeouts during processing
+  if (wdt_added) esp_task_wdt_reset();
+  
   char json[len + 1];
   memcpy(json, payload, len);
   json[len] = '\0';
@@ -864,74 +908,32 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   DeserializationError err = deserializeJson(doc, json);
   if (err) {
     Serial.printf("❌ MQTT JSON parse error: %s\n", err.c_str());
-    Serial.printf("📝 Attempted to parse: '%s'\n", json);
-    
-    // Try to fix common JSON issues
-    String fixedJson = String(json);
-    fixedJson.replace("{text:", "{\"text\":");
-    fixedJson.replace(",color:", ",\"color\":");
-    fixedJson.replace(",duration:", ",\"duration\":");
-    fixedJson.replace(",page:", ",\"page\":");
-    fixedJson.replace(",brightness:", ",\"brightness\":");
-    fixedJson.replace(",enabled:", ",\"enabled\":");
-    
-    Serial.printf("🔧 Attempting to fix JSON: '%s'\n", fixedJson.c_str());
-    err = deserializeJson(doc, fixedJson);
-    if (err) {
-      Serial.printf("❌ Still failed after fix attempt: %s\n", err.c_str());
-      return;
-    } else {
-      Serial.println("✅ JSON fixed and parsed successfully!");
-    }
-  } else {
-    Serial.println("✅ JSON parsed successfully on first try!");
+    Serial.printf("📝 Failed payload: '%s'\n", json);
+    return; // Exit immediately on JSON parse error (no fixing attempts)
   }
+  
+  Serial.println("✅ JSON parsed successfully!");
 
-  // Build topic strings for comparison
-  char baseTopic[strlen(MQTT_BASE) + 1];
-  strcpy(baseTopic, MQTT_BASE);
-
-  char notifyTopic[strlen(baseTopic) + 8];
-  strcpy(notifyTopic, baseTopic);
-  strcat(notifyTopic, "/notify");
-
-  char pageTopic[strlen(baseTopic) + 6];
-  strcpy(pageTopic, baseTopic);
-  strcat(pageTopic, "/page");
-
-  char brightnessTopic[strlen(baseTopic) + 12];
-  strcpy(brightnessTopic, baseTopic);
-  strcat(brightnessTopic, "/brightness");
-
-  char autoBrightnessTopic[strlen(baseTopic) + 17];
-  strcpy(autoBrightnessTopic, baseTopic);
-  strcat(autoBrightnessTopic, "/auto_brightness");
-
-  char configTopic[strlen(baseTopic) + 8];
-  strcpy(configTopic, baseTopic);
-  strcat(configTopic, "/config");
-
-  char weatherTopic[strlen(baseTopic) + 9];
-  strcpy(weatherTopic, baseTopic);
-  strcat(weatherTopic, "/weather");
-
-  // Route to appropriate handlers
-  if (strcmp(topic, notifyTopic) == 0) {
+  // Route to handlers using suffix matching (more efficient)
+  String topicStr = String(topic);
+  if (topicStr.endsWith("/notify")) {
     handleNotify(doc);
-  } else if (strcmp(topic, pageTopic) == 0) {
+  } else if (topicStr.endsWith("/page")) {
     handlePageCommand(doc);
-  } else if (strcmp(topic, brightnessTopic) == 0) {
+  } else if (topicStr.endsWith("/brightness")) {
     handleBrightness(doc);
-  } else if (strcmp(topic, autoBrightnessTopic) == 0) {
+  } else if (topicStr.endsWith("/auto_brightness")) {
     handleAutoBrightness(doc);
-  } else if (strcmp(topic, configTopic) == 0) {
+  } else if (topicStr.endsWith("/config")) {
     handleConfig(doc);
-  } else if (strcmp(topic, weatherTopic) == 0) {
+  } else if (topicStr.endsWith("/weather")) {
     fetchWeatherData();
+  } else if (topicStr.endsWith("/time")) {
+    handleTimeCommand(doc);
   }
 }
 
-/*********** FREERTOS TASKS ***********/
+// FreeRTOS Tasks
 // Render Task - Core 1: High-priority display and UI updates
 void renderTask(void *pvParameters) {
   unsigned long lastRenderMs = 0;
@@ -952,10 +954,10 @@ void renderTask(void *pvParameters) {
       colonVisible = !colonVisible;
     }
     
-    // Handle page rotation (non-blocking)
+    // Handle page rotation (non-blocking) - only clock and weather pages
     if (rotationEnabled && !notifyActive && (currentMs - lastPageChangeMs > pageDurationMs)) {
       lastPageChangeMs = currentMs;
-      currentPage = (PageType)((currentPage + 1) % 3);
+      currentPage = (currentPage == PAGE_CLOCK) ? PAGE_WEATHER : PAGE_CLOCK;
     }
     
     // Render at 30 FPS (33ms intervals) for smooth display
@@ -980,9 +982,6 @@ void renderTask(void *pvParameters) {
           switch (currentPage) {
             case PAGE_CLOCK:
               drawClock();
-              break;
-            case PAGE_CALENDAR:
-              drawCalendar();
               break;
             case PAGE_WEATHER:
               drawWeather();
@@ -1042,7 +1041,7 @@ void networkTask(void *pvParameters) {
   }
 }
 
-/*********** ARDUINO SETUP ***********/
+// Arduino Setup
 void setup() {
   Serial.begin(115200);
   Serial.println("\n=== TC001 Enhanced Clock Starting (Single File Version) ===");
@@ -1051,12 +1050,9 @@ void setup() {
   Serial.println("Initializing LED matrix...");
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   
-  // Startup test: briefly show bright display to verify screen works
-  Serial.println("Testing display with bright startup pattern...");
-  FastLED.setBrightness(50);  // Temporarily use higher brightness for test
-  fill_solid(leds, NUM_LEDS, CRGB(255, 255, 255));  // Fill with white
-  FastLED.show();
-  delay(2000);  // Show for 2 seconds (safe - WDT not armed yet)
+  // Startup message: show LaMetric watchdog icon
+  Serial.println("Showing watchdog boot icon...");
+  drawWatchdogBootIcon();
   
   // Set normal brightness
   updateBrightness();
@@ -1064,6 +1060,13 @@ void setup() {
   clearAll();
   FastLED.show();
   Serial.printf("LED matrix initialized with brightness: %d\n", currentBrightness);
+
+  // Setup timezone for MQTT time conversion (Mountain Time with DST)
+  Serial.println("Setting up Mountain Time timezone...");
+  const char* TZ_DENVER = "MST7MDT,M3.2.0/2,M11.1.0/2";
+  setenv("TZ", TZ_DENVER, 1);
+  tzset();
+  Serial.println("Timezone configured: Mountain Time (MST/MDT with automatic DST)");
 
   // Initialize network
   ensureWifi();
@@ -1076,9 +1079,9 @@ void setup() {
   }
   Serial.println(" Network ready!");
 
-  // Setup time synchronization
-  Serial.println("Setting up time synchronization...");
-  setupTime();
+  // NTP removed for performance - time sync now via MQTT only
+  Serial.println("Time sync via MQTT only (NTP disabled for performance)");
+  // setupTime(); // Commented out - using MQTT time instead
 
   // Configure MQTT
   Serial.printf("Configuring MQTT for server %s:%d\n", MQTT_HOST, MQTT_PORT);
@@ -1103,7 +1106,7 @@ void setup() {
   if (!wdt_added) {
     Serial.println("Configuring watchdog timer for dual-core tasks...");
     esp_task_wdt_config_t twdt_config = {
-      .timeout_ms = 15000,  // 15 second timeout (increased for network operations)
+      .timeout_ms = 30000,  // 30 second timeout (more lenient for stability)
       .idle_core_mask = 0,  // Don't watch idle cores (prevents false triggers)
       .trigger_panic = true
     };
@@ -1150,7 +1153,7 @@ void setup() {
   Serial.println("=== Dual-core setup complete ===");
 }
 
-/*********** ARDUINO LOOP ***********/
+// Arduino Loop
 void loop() {
   // In dual-core mode, the main loop just monitors system health
   // All rendering and network operations are handled by dedicated tasks

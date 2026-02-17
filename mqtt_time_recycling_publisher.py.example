@@ -40,7 +40,7 @@ except ImportError:
     MQTT_V2 = False
 
 # Configuration - Update these to match your setup
-MQTT_HOST = "192.168.X.X"   # Your MQTT broker IP address
+MQTT_HOST = "192.168.1.100"    # Your MQTT broker IP address
 MQTT_PORT = 1883               # Standard MQTT port
 MQTT_BASE = "tc001"            # Base topic for all MQTT messages (match config.h)
 MQTT_USERNAME = None           # Set if your broker requires authentication
@@ -52,9 +52,9 @@ CLIENT_ID = "tc001-time-publisher"
 TIMEZONE = "America/Denver"    # Mountain Time (MST/MDT with automatic DST)
 
 # OpenWeather settings (for freeze warnings)
-OPENWEATHER_API_KEY = "***REMOVED_API_KEY***"
-OPENWEATHER_LAT = "XX.XXXXXX"
-OPENWEATHER_LON = "-XXX.XXXXXX"
+OPENWEATHER_API_KEY = "your_openweather_api_key_here"
+OPENWEATHER_LAT = "YOUR_LATITUDE"
+OPENWEATHER_LON = "YOUR_LONGITUDE"
 WEATHER_CHECK_INTERVAL = 1800  # Check every 30 minutes
 FREEZE_THRESHOLD_F = 32.0      # Alert below this temperature
 FREEZE_ALERT_INTERVAL = 600    # Re-alert every 10 minutes while freezing

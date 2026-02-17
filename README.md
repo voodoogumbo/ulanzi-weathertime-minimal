@@ -83,8 +83,8 @@ const char* WIFI_SSID     = "YourWiFiNetwork";
 const char* WIFI_PASSWORD = "YourWiFiPassword";
 const char* MQTT_HOST     = "192.168.1.100";
 const char* OPENWEATHER_API_KEY = "your_api_key_here";
-const char* OPENWEATHER_LAT = "XX.XXXX";
-const char* OPENWEATHER_LON = "-XXX.XXXX";
+const char* OPENWEATHER_LAT = "YOUR_LATITUDE";
+const char* OPENWEATHER_LON = "YOUR_LONGITUDE";
 ```
 
 ### 3. Install Arduino Libraries
@@ -122,12 +122,17 @@ The Python script handles time sync and all smart alerts:
 pip install paho-mqtt pytz
 ```
 
+Copy the example and fill in your values:
+```bash
+cp mqtt_time_recycling_publisher.py.example mqtt_time_recycling_publisher.py
+```
+
 Edit the config section in `mqtt_time_recycling_publisher.py`:
 ```python
 MQTT_HOST = "192.168.1.100"       # Your MQTT broker
 OPENWEATHER_API_KEY = "your_key"  # For freeze warnings
-OPENWEATHER_LAT = "XX.XXXX"       # Your location
-OPENWEATHER_LON = "-XXX.XXXX"
+OPENWEATHER_LAT = "YOUR_LATITUDE"  # Your location
+OPENWEATHER_LON = "YOUR_LONGITUDE"
 ```
 
 Run it (or set up as a scheduled task / service):

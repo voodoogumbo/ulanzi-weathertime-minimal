@@ -2,8 +2,9 @@
 # 
 # SECURITY: Protect sensitive configuration files from being committed
 
-# Real configuration file with credentials (NEVER COMMIT THIS)
+# Real configuration files with credentials (NEVER COMMIT THESE)
 config.h
+mqtt_time_recycling_publisher.py
 
 # Temporary files
 *.tmp

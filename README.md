@@ -1,200 +1,242 @@
 # TC001 Enhanced Clock 🕐
 
-A complete, feature-rich smart clock firmware for the TC001 32x8 LED matrix device with AWTRIX-style display, weather integration, and robust MQTT control.
+A feature-rich smart clock firmware for the Ulanzi TC001 32x8 LED matrix with AWTRIX-style display, scrolling notifications, live BYU sports scores, NWS weather alerts, and MQTT control.
 
-## 🚀 **Latest Enhancements**
-- 🐕 **LaMetric Watchdog Boot Icon**: Professional startup icon in LaMetric orange
-- 🌡️ **Dynamic Temperature Colors**: Gradient scaling from white (0°F) to red (100°F+)
-- 🌙 **Ultra-Dim Night Mode**: Brightness drops to 1 after 10pm for bedroom use
-- ⚡ **Performance Optimized**: NTP removed, MQTT-only time sync for faster operation
-- 🛡️ **Rock-Solid Stability**: 30-second watchdog timer prevents reboots
-- 🕐 **MQTT Time Sync**: Unix timestamp-based time with automatic Mountain Time/DST
-- ☁️ **3D Cloud Gradients**: Sophisticated 5-row cloud shading with realistic depth
-- 🔍 **Time Source Indicator**: Green pixel = MQTT time active
-- 📦 **Condensed Code**: 192 lines removed, optimized for maintainability
+## 🚀 What's New (Feb 2026)
 
-[![Arduino](https://img.shields.io/badge/Arduino-ESP32-blue.svg)](https://www.arduino.cc/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-ESP32-red.svg)](https://espressif.com/en/products/socs/esp32)
+### Firmware Optimizations
+- ⚡ **Cached Recycling Check**: Was 60 `mktime()` calls/sec, now rechecks once per hour
+- 🧹 **Zero Heap Fragmentation**: All Arduino `String` replaced with fixed `char[]` buffers for long-term stability
+- 🎯 **Adaptive Frame Rate**: 10 FPS normally (was 30), 20 FPS during scroll — 66% less CPU
+- 🛡️ **MQTT Payload Guard**: Rejects oversized payloads to prevent stack overflow
+- 🌡️ **Negative Temperature Support**: Renders minus sign for sub-zero Fahrenheit
+
+### Scrolling Notifications
+- 📜 **5x7 Large Font**: Full A-Z alphabet at clock-digit height for readable scrolling text
+- 🔄 **Auto-Scroll**: Text wider than 32px automatically scrolls with configurable speed and repeat
+- 📏 **Smart Sizing**: Short text uses large font centered, falls back to 3x5 if needed
+- ⚙️ **MQTT Params**: `speed` (ms/pixel), `repeat` (loop count), `color` (hex)
+
+### Smart Alerts (Python Script)
+- 🏈 **BYU Live Scores**: ESPN API — game day alerts, live score updates every 2 min, final scores
+- 🏆 **Win Celebration**: BYU wins scroll every 10 min for 1 hour in green. Losses scroll once in red.
+- 🥶 **Freeze Warnings**: Scrolls ice-blue alert when temp drops below 32F
+- 🌪️ **NWS Severe Weather**: Tornado, winter storm, flood warnings — free API, no key needed
+- ♻️ **Recycling Reminder**: "RECYCLING TOMORROW" scrolls Sunday evening before pickup
 
 ## ✨ Features
 
-### 🔥 **Core Display Features**
+### 🔥 Core Display
 - **32x8 LED Matrix**: Full-width AWTRIX TMODE5-style clock display
-- **Optimized Time Display**: Perfect pixel spacing, no text overflow
-- **Enhanced Colon**: Two separate 2x2 blocks with clean blinking animation
+- **Dual Font System**: 6x7 bold digits for clock, 5x7 letters for scrolling notifications
+- **Enhanced Colon**: Two 2x2 blocks with clean blinking animation
 - **Page Rotation**: Clock → Weather (configurable timing)
-- **Ultra-Dim Night Mode**: Automatic red display + brightness = 1 after 22:00 (10pm)
-- **LaMetric Watchdog Boot**: Professional startup icon in signature orange
+- **Ultra-Dim Night Mode**: Red display + brightness = 1 after 10pm
+- **LaMetric Watchdog Boot**: Startup icon in signature orange
 
-### 🌤️ **Smart Weather Integration**
-- **OpenWeather API**: Real-time weather data with 15-minute updates
-- **Day/Night Icons**: Intelligent sun/moon switching based on API data
-- **3D Cloud Gradients**: Revolutionary 5-row gradient system with realistic atmospheric depth
-  - **Row 5 (bottom)**: Dark gray shadow base
-  - **Row 4**: Medium gray with dark right edge (shadow transition)
-  - **Row 3**: Light gray with medium right edge (highlight transition)
-  - **Rows 2 & 1**: Bright highlight (sunlit cloud top)
-- **Temperature Color Scaling**: Dynamic color gradient from white (0°F) to red (100°F+)
-- **Weather Icon Colors**: Unique colors for each weather condition
-  - ☀️ **Sun**: Golden yellow - ☁️ **3D Clouds**: Multi-gray gradient
-  - 🌙 **Moon**: Silver-blue - 🌧️ **Rain**: Deep blue 
-  - ❄️ **Snow**: Pure white - ⛈️ **Thunderstorm**: Electric purple
+### 🌤️ Weather
+- **OpenWeather API**: Real-time data with 15-minute updates
+- **Day/Night Icons**: Sun/moon switching based on API data
+- **3D Cloud Gradients**: 5-row gradient system with realistic depth
+- **Temperature Color Scaling**: Ice-blue (sub-zero) → white (0F) → red (100F+)
+- **Negative Temps**: Proper minus sign rendering for sub-zero weather
+- **Weather Icon Colors**:
+  - ☀️ Sun: Golden yellow — ☁️ Clouds: Multi-gray gradient
+  - 🌙 Moon: Silver-blue — 🌧️ Rain: Deep blue
+  - ❄️ Snow: Pure white — ⛈️ Thunder: Electric purple
 
-### 📡 **Advanced MQTT Control**
-- **MQTT Time Sync**: Unix timestamp-based time with automatic Mountain Time/DST conversion
-- **Performance Optimized**: NTP removed for faster, more reliable operation
-- **Lightning-Fast Response**: Instant MQTT processing with consolidated topic routing
-- **Visual Time Indicator**: Green pixel shows active MQTT time source
-- **Comprehensive Topics**: Full device control via MQTT (`/time`, `/notify`, `/weather`, etc.)
-- **Enhanced Debugging**: Detailed logging with hex dump analysis
+### 📡 MQTT
+- **MQTT Time Sync**: Unix timestamp with automatic Mountain Time/DST
+- **Zero-Allocation Routing**: `strstr()` topic matching, no heap allocations
+- **Smart Status Indicator**: Royal blue pixel for MQTT, green on recycle days
+- **Scrolling Notifications**: Long text auto-scrolls with configurable speed/repeat
+- **Payload Protection**: 500-byte cap prevents stack overflow from malformed messages
 
-### 🔧 **Robust Architecture**
-- **Dual-Core FreeRTOS**: Dedicated cores for display and networking
-- **Ultra-Stable Watchdog**: 30-second timeout for maximum stability
-- **Network Stability**: Bulletproof WiFi/MQTT reconnection logic
-- **Mountain Time**: Automatic DST handling with timezone accuracy
-- **Optimized Code**: 1161 lines (192 lines removed), cleaner and more maintainable
+### 🔧 Architecture
+- **Dual-Core FreeRTOS**: Core 1 renders, Core 0 handles networking (no scroll stutter)
+- **30-Second Watchdog**: Prevents hangs with task-level monitoring
+- **Adaptive FPS**: 10 FPS for static display, 20 FPS during scroll animations
+- **Task Resurrection**: Main loop auto-restarts crashed render/network tasks
+- **No Arduino String**: Fixed buffers eliminate heap fragmentation over weeks of uptime
 
-## 🛠️ Hardware Requirements
+## 🛠️ Hardware
 
-- **TC001 Device** (32x8 WS2812B LED matrix)
-- **ESP32** microcontroller
-- **Light sensor** on GPIO35 (for auto-brightness)
-- **WiFi connection**
-- **MQTT broker** (Home Assistant, Mosquitto, etc.)
+- **Ulanzi TC001** (32x8 WS2812B LED matrix, ESP32-D0WD)
+- **LED Matrix**: GPIO32, serpentine wiring (even rows L→R, odd rows R→L)
+- **Light Sensor**: GPIO35 (GL5516 photoresistor)
+- **Buttons**: Left (GPIO26), Middle (GPIO27), Right (GPIO14)
+- **USB**: CH340 USB-to-Serial
+- **Also available** (unused): SHT3x temp sensor (I2C 0x44), DS1307 RTC (I2C 0x68), Buzzer (GPIO15)
 
 ## 🚀 Quick Setup
 
-### 1. **Download & Configure**
+### 1. Clone & Configure
 ```bash
-git clone https://github.com/yourusername/tc001-enhanced-clock.git
-cd tc001-enhanced-clock
+git clone https://github.com/voodoogumbo/ulanzi-weathertime-minimal.git
+cd ulanzi-weathertime-minimal
 cp config.h.example config.h
 ```
 
-### 2. **Edit Configuration**
-Open `config.h` and fill in your settings:
+### 2. Edit `config.h`
 ```cpp
 const char* WIFI_SSID     = "YourWiFiNetwork";
 const char* WIFI_PASSWORD = "YourWiFiPassword";
-const char* MQTT_HOST     = "192.168.1.100";  // Your MQTT broker
+const char* MQTT_HOST     = "192.168.1.100";
 const char* OPENWEATHER_API_KEY = "your_api_key_here";
-const char* OPENWEATHER_LAT = "40.7128";      // Your latitude
-const char* OPENWEATHER_LON = "-74.0060";     // Your longitude
+const char* OPENWEATHER_LAT = "XX.XXXX";
+const char* OPENWEATHER_LON = "-XXX.XXXX";
 ```
 
-### 3. **Setup MQTT Time Source**
-**IMPORTANT**: This clock requires MQTT time sync (NTP removed for performance)
-1. Install Python requirements: `pip install paho-mqtt`
-2. Edit `mqtt_time_publisher.py` with your MQTT broker settings
-3. Run continuously: `python3 mqtt_time_publisher.py`
-
-### 4. **Install Dependencies**
-In Arduino IDE, install these libraries:
+### 3. Install Arduino Libraries
+In Arduino IDE → Sketch → Include Library → Manage Libraries:
 - `FastLED` by Daniel Garcia
-- `PubSubClient` by Nick O'Leary  
+- `PubSubClient` by Nick O'Leary
 - `ArduinoJson` by Benoit Blanchon
 
-### 5. **Upload Firmware**
-1. Open `TC001_Enhanced_SingleFile.ino` in Arduino IDE
-2. Select **ESP32 Dev Module** board
-3. Upload to your TC001 device
-4. Watch for LaMetric watchdog boot icon and green time indicator!
+### 4. Arduino IDE Board Settings
+```
+Board:            ESP32 Dev Module
+Upload Speed:     115200  (CRITICAL — higher speeds fail on TC001)
+CPU Frequency:    240MHz
+Flash Frequency:  80MHz
+Flash Mode:       QIO
+Flash Size:       4MB (32Mb)
+Partition Scheme: Default 4MB with spiffs (1.2MB APP/1.5MB SPIFFS)
+Core Debug Level: None
+PSRAM:            Disabled
+```
 
-## 📋 API Setup Guides
+### 5. Flash the TC001
+1. **Unplug** USB from the TC001
+2. **Hold the middle button** (center front)
+3. **While holding**, plug in USB
+4. Hold 2-3 more seconds, then release
+5. Click **Upload** in Arduino IDE
 
-### OpenWeather API
-1. Sign up at [OpenWeatherMap](https://openweathermap.org/api)
-2. Get your free API key
-3. Find your coordinates at [LatLong.net](https://www.latlong.net/)
+Success: orange dog face icon → clock with royal blue status dot.
 
-### MQTT Broker Options
-- **Home Assistant**: Built-in MQTT broker
-- **Mosquitto**: Standalone MQTT broker
-- **Cloud**: AWS IoT, HiveMQ Cloud, etc.
+### 6. Setup Python Script
+The Python script handles time sync and all smart alerts:
+
+```bash
+pip install paho-mqtt pytz
+```
+
+Edit the config section in `mqtt_time_recycling_publisher.py`:
+```python
+MQTT_HOST = "192.168.1.100"       # Your MQTT broker
+OPENWEATHER_API_KEY = "your_key"  # For freeze warnings
+OPENWEATHER_LAT = "XX.XXXX"       # Your location
+OPENWEATHER_LON = "-XXX.XXXX"
+```
+
+Run it (or set up as a scheduled task / service):
+```bash
+python3 mqtt_time_recycling_publisher.py
+```
+
+The script automatically provides:
+- Time sync every 60 seconds (retained for instant reboot recovery)
+- Freeze warnings when temp < 32F (checks every 30 min, alerts every 10 min)
+- NWS severe weather alerts (checks every 15 min)
+- Recycling reminders Sunday evening (every 10 min after 6 PM)
+- BYU basketball & football live scores (ESPN API, every 2 min during games)
 
 ## 📡 MQTT Topics & Commands
 
 Replace `tc001` with your configured `MQTT_BASE` value.
 
-### 📢 **Notifications**
+### 📜 Notifications (with Scrolling)
 ```bash
-# Show notification with custom color and duration
-mosquitto_pub -h YOUR_BROKER -t "tc001/notify" -m '{"text":"Hello World","color":"FF0000","duration":5}'
+# Short text — displays centered in large 5x7 font
+mosquitto_pub -h BROKER -t "tc001/notify" -m '{"text":"Hello","color":"00FF00"}'
 
-# Simple text notification (default yellow, 4 seconds)
-mosquitto_pub -h YOUR_BROKER -t "tc001/notify" -m '{"text":"Meeting in 5 min"}'
+# Long text — auto-scrolls across the display
+mosquitto_pub -h BROKER -t "tc001/notify" -m '{"text":"BYU beats Arizona in overtime thriller","color":"00FF00"}'
+
+# Custom scroll speed and repeat count
+mosquitto_pub -h BROKER -t "tc001/notify" -m '{"text":"Your message here","color":"FF0000","speed":60,"repeat":3}'
 ```
 
-### 📄 **Page Control**
-```bash
-# Switch to specific page
-mosquitto_pub -h YOUR_BROKER -t "tc001/page" -m '{"page":"clock"}'
-mosquitto_pub -h YOUR_BROKER -t "tc001/page" -m '{"page":"calendar"}'
-mosquitto_pub -h YOUR_BROKER -t "tc001/page" -m '{"page":"weather"}'
+**Notification Parameters:**
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `text` | string | required | Message to display (max 63 chars) |
+| `color` | hex string | `"FFFF00"` | Text color (RRGGBB) |
+| `duration` | int | `4` | Seconds to show static text |
+| `speed` | int | `80` | Milliseconds per pixel shift (lower = faster scroll) |
+| `repeat` | int | `2` | Number of full scroll loops |
+
+**Windows cmd.exe example:**
+```cmd
+"C:\Program Files\mosquitto\mosquitto_pub.exe" -h 192.168.1.100 -t "tc001/notify" -m "{\"text\":\"Hello World\",\"color\":\"00FF00\"}"
 ```
 
-### 💡 **Brightness Control**
-```bash
-# Set manual brightness (1-255)
-mosquitto_pub -h YOUR_BROKER -t "tc001/brightness" -m '{"brightness":100}'
+> **Note**: PowerShell mangles JSON quotes. Use `cmd.exe` or a dedicated MQTT client.
 
-# Toggle auto-brightness
-mosquitto_pub -h YOUR_BROKER -t "tc001/auto_brightness" -m '{"enabled":true}'
-mosquitto_pub -h YOUR_BROKER -t "tc001/auto_brightness" -m '{"enabled":false}'
+### 📄 Page Control
+```bash
+mosquitto_pub -h BROKER -t "tc001/page" -m '{"page":"clock"}'
+mosquitto_pub -h BROKER -t "tc001/page" -m '{"page":"weather"}'
 ```
 
-### ⚙️ **Configuration**
+### 💡 Brightness
 ```bash
-# Change page rotation timing (seconds)
-mosquitto_pub -h YOUR_BROKER -t "tc001/config" -m '{"page_duration":15}'
-
-# Disable page rotation
-mosquitto_pub -h YOUR_BROKER -t "tc001/config" -m '{"rotation_enabled":false}'
-
-# Change weather update interval (minutes)
-mosquitto_pub -h YOUR_BROKER -t "tc001/config" -m '{"weather_update_minutes":30}'
+mosquitto_pub -h BROKER -t "tc001/brightness" -m '{"brightness":100}'
+mosquitto_pub -h BROKER -t "tc001/auto_brightness" -m '{"enabled":true}'
 ```
 
-### 🌤️ **Weather Control**
+### ⚙️ Configuration
 ```bash
-# Force immediate weather update
-mosquitto_pub -h YOUR_BROKER -t "tc001/weather" -m '{}'
+mosquitto_pub -h BROKER -t "tc001/config" -m '{"page_duration":15}'
+mosquitto_pub -h BROKER -t "tc001/config" -m '{"rotation_enabled":false}'
+mosquitto_pub -h BROKER -t "tc001/config" -m '{"weather_update_minutes":30}'
 ```
 
-### 🕐 **Time Synchronization**
+### 🕐 Time Sync
 ```bash
-# Send Unix timestamp for time sync (replaces NTP)
-mosquitto_pub -h YOUR_BROKER -t "tc001/time" -m '{"unix_time":1640995200}'
-
-# Or use the included Python script for continuous time publishing
-python3 mqtt_time_publisher.py
+mosquitto_pub -h BROKER -t "tc001/time" -m '{"unix_time":1640995200}'
 ```
 
-**Python Time Publisher Setup:**
-1. Install requirements: `pip install paho-mqtt`
-2. Edit `mqtt_time_publisher.py` to match your MQTT broker settings
-3. Run continuously: `python3 mqtt_time_publisher.py`
-4. The script publishes Unix timestamps every 60 seconds
-5. Clock will show green pixel (bottom right) when using MQTT time vs blue for NTP
+## 🏈 BYU Sports Integration
+
+The Python script monitors ESPN's free API for BYU Cougars men's basketball and football:
+
+| Situation | Display | Color | Frequency |
+|-----------|---------|-------|-----------|
+| Game day | `BYU VS HOUSTON 7PM` | Blue | Hourly |
+| Live game | `BYU 45 ARIZ 38 2nd Half` | Blue | Every 5 min + on score changes |
+| Score change | Immediate update | Blue | Instant |
+| BYU wins | `BYU WINS 85 71 VS ARIZONA` | Green | Every 10 min for 1 hour |
+| BYU loss | `BYU LOSS 60 74 VS ARIZONA` | Red | Once (we don't dwell on it) |
+
+Polling adapts automatically: 30 min between games, 2 min during live games.
+
+## 🌪️ NWS Weather Alerts
+
+Free from the National Weather Service — no API key needed. Monitors for:
+- Tornado / severe thunderstorm warnings
+- Winter storm / blizzard warnings
+- Flash flood warnings
+- Wind advisories / wind chill advisories
+- Red flag warnings
+
+Alerts scroll in color by severity: red (Extreme), orange-red (Severe), orange (Moderate).
 
 ## 🏠 Home Assistant Integration
-
-Add to your `configuration.yaml`:
 
 ```yaml
 mqtt:
   sensor:
     - name: "TC001 Clock Status"
       state_topic: "tc001/status"
-      
+
   switch:
     - name: "TC001 Auto Brightness"
       command_topic: "tc001/auto_brightness"
       payload_on: '{"enabled":true}'
       payload_off: '{"enabled":false}'
-      
+
   button:
     - name: "TC001 Update Weather"
       command_topic: "tc001/weather"
@@ -207,68 +249,53 @@ script:
       - service: mqtt.publish
         data:
           topic: "tc001/notify"
-          payload: '{"text":"{{ message }}","color":"{{ color | default(\"FFFF00\") }}","duration":{{ duration | default(4) }}}'
+          payload: '{"text":"{{ message }}","color":"{{ color | default("FFFF00") }}"}'
 ```
 
 ## 🐛 Troubleshooting
 
-### **MQTT JSON Parse Errors**
-The firmware uses fast, strict JSON parsing for maximum responsiveness:
+### Upload Failures
+| Error | Cause | Fix |
+|-------|-------|-----|
+| "Packet content transfer stopped" | Baud too high or bad USB | Set Upload Speed to **115200**, try different cable |
+| "The chip stopped responding" | Baud rate issue | Upload Speed → **115200** |
+| No serial port | Missing driver | Install CH340 driver, verify data cable |
+
+**Upload tip**: Hold middle button → plug USB → wait 3 sec → release → Upload.
+
+### MQTT JSON Parse Errors
 ```
-❌ MQTT JSON parse error: InvalidInput
-📝 Failed payload: '{"text":"Test from PC"}'
+MQTT JSON parse error: InvalidInput
+Failed payload: '{text:Hello,color:00FF00}'
 ```
+**Cause**: Quotes stripped by PowerShell. **Fix**: Use `cmd.exe` instead, or an MQTT client app.
 
-**Common Fixes:**
-- Ensure proper JSON formatting with quoted keys: `{"text":"message"}`
-- Check for hidden characters (use hex dump in logs)
-- Verify MQTT broker settings
-- Test with simple payloads first: `{"text":"hello"}`
-
-### **Weather Not Updating**
-1. Verify API key is valid and active
-2. Check coordinates are correct (decimal degrees)
-3. Monitor logs for HTTP response codes
-4. Ensure internet connectivity
-
-### **WiFi Connection Issues**
-1. Check SSID and password in `config.h`
-2. Verify network is 2.4GHz (ESP32 limitation)
-3. Monitor watchdog logs for network timeouts
-
-### **Display Issues**
-1. Verify LED_PIN is correct (GPIO32 for TC001)
-2. Check power supply capacity (32x8 LEDs = ~15W max)
-3. Adjust brightness for power limitations
+### Status Indicator Colors
+- **Royal Blue** dot (bottom right): MQTT connected, normal day
+- **Green** dot (bottom right): MQTT connected, recycle day
+- **Light Blue** dot (bottom right): No MQTT time (fallback)
 
 ## 🔒 Security Notes
 
-- **Never commit `config.h`** to public repositories
-- Use strong WiFi passwords
-- Secure your MQTT broker with authentication
-- Consider VPN for remote MQTT access
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+- **Never commit `config.h`** — contains WiFi password and API keys
+- The Python script also contains API keys — keep it private
+- Secure your MQTT broker with authentication in production
+- ESP32 only supports 2.4GHz WiFi
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License — see [LICENSE](LICENSE) for details.
 
 ## 🙏 Acknowledgments
 
-- **FastLED Library** - Incredible LED control library
-- **AWTRIX** - Inspiration for the display style
-- **OpenWeatherMap** - Free weather API
-- **Home Assistant Community** - MQTT integration patterns
+- **[FastLED](https://github.com/FastLED/FastLED)** — LED control library
+- **[AWTRIX](https://github.com/Blueforcer/awtrix3)** — Display style inspiration
+- **[Ulanzi TC001 Hardware Docs](https://github.com/rroels/ulanzi_tc001_hardware)** — Pin mappings and hardware reference
+- **[OpenWeatherMap](https://openweathermap.org/)** — Weather API
+- **[NWS API](https://api.weather.gov/)** — Free severe weather alerts
+- **[ESPN API](https://site.api.espn.com/)** — Free sports scores
+- **Claude Code** — Pair programming partner
 
 ---
 
-**Made with ❤️ for the ESP32 and smart home community**
-
-For questions and support, please open an issue on GitHub.
+**Made with ❤️ in Utah for the ESP32 and smart home community**

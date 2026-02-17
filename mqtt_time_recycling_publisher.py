@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+"""
+MQTT Time Publisher + Smart Alerts for TC001 Enhanced Clock
+
+This script publishes Unix timestamps and automated notifications to your
+TC001 clock via MQTT.
+
+Features:
+- Time sync: Retained MQTT timestamps every 60 seconds
+- Freeze warning: Scrolling alert when temperature drops below 32F
+- Recycling reminder: Sunday evening reminders every 10 minutes
+- NWS severe weather alerts: Tornado, winter storm, flood warnings (free API)
+- Robust error handling and reconnection logic
+
+Usage:
+    python3 mqtt_time_recycling_publisher.py
+
+Requirements:
+    pip install paho-mqtt pytz
+
+Author: Claude Code Assistant
+License: MIT
+"""
+
+import time
+import json
+import paho.mqtt.client as mqtt
+import logging
+import sys
+from datetime import datetime, timedelta
+from urllib.request import Request, urlopen
+from urllib.error import URLError
+import pytz
+
+# Handle paho-mqtt version compatibility (1.x vs 2.x)
+try:
+    from paho.mqtt.client import CallbackAPIVersion
+    MQTT_V2 = True
+except ImportError:
+    MQTT_V2 = False
+
+# Configuration - Update these to match your setup
+MQTT_HOST = "192.168.X.X"   # Your MQTT broker IP address
+MQTT_PORT = 1883               # Standard MQTT port
+MQTT_BASE = "tc001"            # Base topic for all MQTT messages (match config.h)
+MQTT_USERNAME = None           # Set if your broker requires authentication
+MQTT_PASSWORD = None           # Set if your broker requires authentication
+
+# Time publishing settings
+TIME_PUBLISH_INTERVAL = 60     # Publish time every 60 seconds
+CLIENT_ID = "tc001-time-publisher"
+TIMEZONE = "America/Denver"    # Mountain Time (MST/MDT with automatic DST)
+
+# OpenWeather settings (for freeze warnings)
+OPENWEATHER_API_KEY = "***REMOVED_API_KEY***"
+OPENWEATHER_LAT = "XX.XXXXXX"
+OPENWEATHER_LON = "-XXX.XXXXXX"
+WEATHER_CHECK_INTERVAL = 1800  # Check every 30 minutes
+FREEZE_THRESHOLD_F = 32.0      # Alert below this temperature
+FREEZE_ALERT_INTERVAL = 600    # Re-alert every 10 minutes while freezing
+
+# NWS Alert settings (free, no API key needed)
+NWS_CHECK_INTERVAL = 900       # Check every 15 minutes
+NWS_ALERT_INTERVAL = 600       # Re-scroll active alerts every 10 minutes
+NWS_USER_AGENT = "(TC001 Clock, github.com/voodoogumbo/ulanzi-weathertime-minimal)"
+
+# BYU Sports settings (ESPN API - free, no key needed)
+BYU_TEAM_ID = "252"
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+BYU_SPORTS = {
+    "basketball": f"{ESPN_BASE}/basketball/mens-college-basketball/teams/{BYU_TEAM_ID}",
+    "football": f"{ESPN_BASE}/football/college-football/teams/{BYU_TEAM_ID}",
+}
+SPORTS_CHECK_INTERVAL = 1800    # Check every 30 min normally
+SPORTS_LIVE_INTERVAL = 120      # Check every 2 min during live games
+SPORTS_SCORE_ALERT_INTERVAL = 300  # Show score every 5 min during live games
+SPORTS_COLOR = "4073FF"         # BYU bright blue (readable on LEDs)
+SPORTS_WIN_COLOR = "00FF00"     # Green for wins
+SPORTS_LOSS_COLOR = "FF0000"    # Red for losses
+
+# Recycling schedule (must match firmware)
+RECYCLE_START_DATE = datetime(2025, 11, 17)  # First recycling Monday
+RECYCLE_INTERVAL_DAYS = 14
+RECYCLE_REMINDER_HOUR = 18     # Start reminding at 6 PM Sunday
+RECYCLE_ALERT_INTERVAL = 600   # Remind every 10 minutes
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class TimePublisher:
+    def __init__(self):
+        # Create MQTT client with version compatibility
+        if MQTT_V2:
+            # paho-mqtt 2.x requires callback_api_version - use VERSION2 for latest
+            self.client = mqtt.Client(client_id=CLIENT_ID, callback_api_version=CallbackAPIVersion.VERSION2)
+        else:
+            # paho-mqtt 1.x doesn't have callback_api_version
+            self.client = mqtt.Client(CLIENT_ID)
+
+        self.client.on_connect = self.on_connect
+        self.client.on_disconnect = self.on_disconnect
+        self.client.on_publish = self.on_publish
+        self.connected = False
+
+        # Set authentication if configured
+        if MQTT_USERNAME and MQTT_PASSWORD:
+            self.client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+        # Initialize timezone
+        self.timezone = pytz.timezone(TIMEZONE)
+
+        # Tracking variables
+        self.last_time_publish = 0
+        self.last_weather_check = 0
+        self.last_freeze_alert = 0
+        self.last_nws_check = 0
+        self.last_nws_alert = 0
+        self.last_recycle_alert = 0
+        self.current_temp_f = None
+        self.is_freezing = False
+        self.active_nws_alerts = []
+        # Sports tracking
+        self.last_sports_check = 0
+        self.last_score_alert = 0
+        self.game_is_live = False
+        self.last_game_state = {}    # Track state to detect changes
+        self.notified_final = set()  # Don't repeat final score alerts
+        self.win_celebration = {}    # {game_id: {"msg": str, "until": timestamp, "last_alert": timestamp}}
+    
+    def on_connect(self, client, userdata, flags, rc, properties=None):
+        if rc == 0:
+            self.connected = True
+            logger.info(f"Connected to MQTT broker at {MQTT_HOST}:{MQTT_PORT}")
+            logger.info(f"Publishing time to topic: {MQTT_BASE}/time (retained)")
+        else:
+            logger.error(f"Failed to connect to MQTT broker. Return code: {rc}")
+            self.connected = False
+    
+    def on_disconnect(self, client, userdata, rc, properties=None):
+        self.connected = False
+        logger.warning(f"Disconnected from MQTT broker. Return code: {rc}")
+    
+    def on_publish(self, client, userdata, mid, properties=None, reasonCode=None):
+        logger.debug(f"Message published successfully (mid: {mid})")
+    
+    def connect(self):
+        try:
+            logger.info(f"Connecting to MQTT broker {MQTT_HOST}:{MQTT_PORT}...")
+            self.client.connect(MQTT_HOST, MQTT_PORT, 60)
+            self.client.loop_start()
+            
+            # Wait for connection
+            wait_time = 0
+            while not self.connected and wait_time < 10:
+                time.sleep(0.5)
+                wait_time += 0.5
+            
+            if not self.connected:
+                logger.error("Failed to connect within timeout period")
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Connection error: {e}")
+            return False
+    
+    def get_local_time(self):
+        """Get current time in configured timezone"""
+        utc_now = datetime.now(pytz.UTC)
+        local_time = utc_now.astimezone(self.timezone)
+        return local_time
+    
+    def publish_time(self):
+        if not self.connected:
+            logger.warning("Not connected to MQTT broker, skipping time publish")
+            return False
+        
+        try:
+            # Get current Unix timestamp
+            unix_time = int(time.time())
+            
+            # Create JSON payload
+            payload = {
+                "unix_time": unix_time
+            }
+            
+            # Publish to topic with MQTT retention for immediate time sync on clock reboot
+            topic = f"{MQTT_BASE}/time"
+            result = self.client.publish(topic, json.dumps(payload), qos=1, retain=True)
+            
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                # Log with human-readable time for verification
+                local_time = self.get_local_time()
+                human_time = local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+                logger.info(f"Published Unix time: {unix_time} ({human_time}) [RETAINED]")
+                return True
+            else:
+                logger.error(f"Failed to publish time message. Return code: {result.rc}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error publishing time: {e}")
+            return False
+    
+    def send_notification(self, text, color="FFFF00", speed=80, repeat=2):
+        """Send a scrolling notification to the clock"""
+        if not self.connected:
+            return False
+        try:
+            payload = {
+                "text": text,
+                "color": color,
+                "speed": speed,
+                "repeat": repeat
+            }
+            topic = f"{MQTT_BASE}/notify"
+            result = self.client.publish(topic, json.dumps(payload), qos=1)
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                logger.info(f"Notification sent: \"{text}\" (color={color})")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error sending notification: {e}")
+            return False
+
+    def check_freeze_warning(self):
+        """Fetch temperature from OpenWeather and alert if below freezing"""
+        try:
+            url = (f"http://api.openweathermap.org/data/2.5/weather"
+                   f"?lat={OPENWEATHER_LAT}&lon={OPENWEATHER_LON}"
+                   f"&appid={OPENWEATHER_API_KEY}&units=imperial")
+            req = Request(url)
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                self.current_temp_f = data["main"]["temp"]
+                self.is_freezing = self.current_temp_f < FREEZE_THRESHOLD_F
+                logger.info(f"Weather check: {self.current_temp_f:.1f}F "
+                           f"({'FREEZING' if self.is_freezing else 'OK'})")
+        except Exception as e:
+            logger.error(f"Weather fetch error: {e}")
+
+    def send_freeze_alert(self):
+        """Send freeze warning notification if below threshold"""
+        if self.is_freezing and self.current_temp_f is not None:
+            temp = round(self.current_temp_f)
+            self.send_notification(
+                f"FREEZE WARNING {temp}F",
+                color="00BBFF",  # Ice blue
+                speed=70,
+                repeat=2
+            )
+
+    def check_nws_alerts(self):
+        """Fetch active NWS alerts for your location (free, no key needed)"""
+        try:
+            url = (f"https://api.weather.gov/alerts/active"
+                   f"?point={OPENWEATHER_LAT},{OPENWEATHER_LON}"
+                   f"&status=actual&urgency=Immediate,Expected")
+            req = Request(url, headers={"User-Agent": NWS_USER_AGENT})
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                alerts = data.get("features", [])
+                self.active_nws_alerts = []
+                for alert in alerts:
+                    props = alert.get("properties", {})
+                    event = props.get("event", "Unknown")
+                    severity = props.get("severity", "Unknown")
+                    # Only keep significant alerts
+                    if severity in ("Extreme", "Severe", "Moderate"):
+                        self.active_nws_alerts.append({
+                            "event": event,
+                            "severity": severity,
+                            "headline": props.get("headline", event)
+                        })
+                if self.active_nws_alerts:
+                    logger.warning(f"NWS: {len(self.active_nws_alerts)} active alert(s)")
+                    for a in self.active_nws_alerts:
+                        logger.warning(f"  - {a['severity']}: {a['event']}")
+                else:
+                    logger.info("NWS: No active alerts")
+        except Exception as e:
+            logger.error(f"NWS alert fetch error: {e}")
+
+    def send_nws_alerts(self):
+        """Scroll any active NWS alerts on the clock"""
+        # Color by severity
+        severity_colors = {
+            "Extreme": "FF0000",   # Red
+            "Severe": "FF4400",    # Orange-red
+            "Moderate": "FFAA00",  # Orange
+        }
+        for alert in self.active_nws_alerts:
+            color = severity_colors.get(alert["severity"], "FFAA00")
+            # Truncate to fit in 64-char notification buffer
+            text = alert["event"].upper()
+            if len(text) > 60:
+                text = text[:60]
+            self.send_notification(text, color=color, speed=60, repeat=2)
+            time.sleep(2)  # Small gap between multiple alerts
+
+    def is_recycle_reminder_time(self):
+        """Check if it's Sunday evening before a recycling Monday"""
+        local_time = self.get_local_time()
+        # Must be Sunday and after the reminder hour
+        if local_time.weekday() != 6:  # 6 = Sunday
+            return False
+        if local_time.hour < RECYCLE_REMINDER_HOUR:
+            return False
+        # Check if tomorrow (Monday) is a recycling day
+        tomorrow = local_time.date() + timedelta(days=1)
+        days_diff = (tomorrow - RECYCLE_START_DATE.date()).days
+        return days_diff >= 0 and days_diff % RECYCLE_INTERVAL_DAYS == 0
+
+    def send_recycle_reminder(self):
+        """Send recycling reminder notification"""
+        self.send_notification(
+            "RECYCLING TOMORROW",
+            color="00FF00",  # Green
+            speed=70,
+            repeat=2
+        )
+
+    def check_byu_sports(self):
+        """Check ESPN for BYU game status across football and basketball"""
+        self.game_is_live = False
+
+        for sport_name, url in BYU_SPORTS.items():
+            try:
+                req = Request(url, headers={"User-Agent": NWS_USER_AGENT})
+                with urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+
+                team = data.get("team", {})
+                events = team.get("nextEvent", [])
+                if not events:
+                    continue
+
+                event = events[0]
+                competition = event.get("competitions", [{}])[0]
+                status = competition.get("status", {})
+                status_type = status.get("type", {})
+                state = status_type.get("name", "")
+                detail = status_type.get("shortDetail", status_type.get("description", ""))
+
+                # Get competitors and find BYU + opponent
+                competitors = competition.get("competitors", [])
+                byu_score = opp_score = "0"
+                opp_name = "OPP"
+                byu_home = True
+
+                for comp in competitors:
+                    team_id = str(comp.get("team", {}).get("id", ""))
+                    if team_id == BYU_TEAM_ID:
+                        byu_score = comp.get("score", "0")
+                        byu_home = comp.get("homeAway", "home") == "home"
+                    else:
+                        opp_score = comp.get("score", "0")
+                        opp_name = comp.get("team", {}).get("abbreviation", "OPP")
+
+                game_id = event.get("id", "")
+
+                if state == "STATUS_IN_PROGRESS":
+                    self.game_is_live = True
+                    # Build live score message
+                    msg = f"BYU {byu_score} {opp_name} {opp_score} {detail}"
+                    logger.info(f"LIVE {sport_name}: {msg}")
+
+                    # Send score update on interval or if score changed
+                    prev = self.last_game_state.get(sport_name, {})
+                    score_changed = (prev.get("byu") != byu_score or
+                                     prev.get("opp") != opp_score)
+
+                    current_time = time.time()
+                    if score_changed or current_time - self.last_score_alert >= SPORTS_SCORE_ALERT_INTERVAL:
+                        self.send_notification(msg, color=SPORTS_COLOR, speed=60, repeat=1)
+                        self.last_score_alert = current_time
+                        if score_changed:
+                            logger.info(f"Score change! {msg}")
+
+                    self.last_game_state[sport_name] = {
+                        "byu": byu_score, "opp": opp_score, "id": game_id
+                    }
+
+                elif state == "STATUS_FINAL":
+                    if game_id not in self.notified_final:
+                        byu_won = int(byu_score) > int(opp_score)
+                        if byu_won:
+                            msg = f"BYU WINS {byu_score} {opp_score} VS {opp_name}"
+                            self.send_notification(msg, color=SPORTS_WIN_COLOR, speed=60, repeat=3)
+                            # Celebrate for 1 hour, every 10 minutes
+                            self.win_celebration[game_id] = {
+                                "msg": msg,
+                                "until": time.time() + 3600,
+                                "last_alert": time.time()
+                            }
+                            logger.info(f"WIN {sport_name}: {msg} (celebrating for 1 hour)")
+                        else:
+                            msg = f"BYU LOSS {byu_score} {opp_score} VS {opp_name}"
+                            self.send_notification(msg, color=SPORTS_LOSS_COLOR, speed=60, repeat=1)
+                            logger.info(f"LOSS {sport_name}: {msg} (shown once, moving on)")
+                        self.notified_final.add(game_id)
+                        self.last_game_state.pop(sport_name, None)
+
+                elif state == "STATUS_SCHEDULED":
+                    # Check if game is today — send game day alert
+                    game_date_str = event.get("date", "")
+                    if game_date_str:
+                        game_utc = datetime.fromisoformat(
+                            game_date_str.replace("Z", "+00:00"))
+                        game_local = game_utc.astimezone(self.timezone)
+                        local_now = self.get_local_time()
+                        if game_local.date() == local_now.date():
+                            game_time = game_local.strftime("%-I%p").replace(
+                                "AM", "AM").replace("PM", "PM")
+                            vs_at = "VS" if byu_home else "AT"
+                            msg = f"BYU {vs_at} {opp_name} {game_time}"
+                            # Only alert once per hour on game day
+                            prev_id = self.last_game_state.get(
+                                f"{sport_name}_gameday")
+                            current_time = time.time()
+                            if prev_id != game_id or current_time - self.last_score_alert >= 3600:
+                                self.send_notification(
+                                    msg, color=SPORTS_COLOR, speed=70, repeat=2)
+                                self.last_game_state[
+                                    f"{sport_name}_gameday"] = game_id
+                                self.last_score_alert = current_time
+                                logger.info(f"GAMEDAY {sport_name}: {msg}")
+
+            except Exception as e:
+                logger.error(f"ESPN {sport_name} fetch error: {e}")
+
+    def run(self):
+        logger.info("Starting MQTT Time Publisher + Smart Alerts...")
+        logger.info(f"Broker: {MQTT_HOST}:{MQTT_PORT}")
+        logger.info(f"Time sync: every {TIME_PUBLISH_INTERVAL}s (retained)")
+        logger.info(f"Freeze alerts: below {FREEZE_THRESHOLD_F}F, check every {WEATHER_CHECK_INTERVAL}s")
+        logger.info(f"NWS alerts: check every {NWS_CHECK_INTERVAL}s")
+        logger.info(f"Recycling: Sun after {RECYCLE_REMINDER_HOUR}:00, every {RECYCLE_ALERT_INTERVAL}s")
+        logger.info(f"BYU Sports: check every {SPORTS_CHECK_INTERVAL}s, live every {SPORTS_LIVE_INTERVAL}s")
+        logger.info(f"Timezone: {TIMEZONE}")
+
+        if not self.connect():
+            logger.error("Failed to connect to MQTT broker. Exiting.")
+            return 1
+
+        try:
+            while True:
+                current_time = time.time()
+
+                if self.connected:
+                    # --- Time sync ---
+                    if current_time - self.last_time_publish >= TIME_PUBLISH_INTERVAL:
+                        self.publish_time()
+                        self.last_time_publish = current_time
+
+                    # --- Freeze warning ---
+                    if current_time - self.last_weather_check >= WEATHER_CHECK_INTERVAL:
+                        self.check_freeze_warning()
+                        self.last_weather_check = current_time
+
+                    if self.is_freezing and current_time - self.last_freeze_alert >= FREEZE_ALERT_INTERVAL:
+                        self.send_freeze_alert()
+                        self.last_freeze_alert = current_time
+
+                    # --- NWS severe weather alerts ---
+                    if current_time - self.last_nws_check >= NWS_CHECK_INTERVAL:
+                        self.check_nws_alerts()
+                        self.last_nws_check = current_time
+
+                    if self.active_nws_alerts and current_time - self.last_nws_alert >= NWS_ALERT_INTERVAL:
+                        self.send_nws_alerts()
+                        self.last_nws_alert = current_time
+
+                    # --- Recycling reminder ---
+                    if self.is_recycle_reminder_time() and current_time - self.last_recycle_alert >= RECYCLE_ALERT_INTERVAL:
+                        self.send_recycle_reminder()
+                        self.last_recycle_alert = current_time
+
+                    # --- BYU Sports scores ---
+                    sports_interval = SPORTS_LIVE_INTERVAL if self.game_is_live else SPORTS_CHECK_INTERVAL
+                    if current_time - self.last_sports_check >= sports_interval:
+                        self.check_byu_sports()
+                        self.last_sports_check = current_time
+
+                    # --- BYU win celebration (re-scroll every 10 min for 1 hour) ---
+                    expired = []
+                    for gid, cel in self.win_celebration.items():
+                        if current_time > cel["until"]:
+                            expired.append(gid)
+                        elif current_time - cel["last_alert"] >= 600:
+                            self.send_notification(cel["msg"], color=SPORTS_WIN_COLOR, speed=60, repeat=2)
+                            cel["last_alert"] = current_time
+                            logger.info(f"Win celebration: {cel['msg']}")
+                    for gid in expired:
+                        del self.win_celebration[gid]
+                        logger.info(f"Win celebration ended for game {gid}")
+
+                else:
+                    logger.warning("Connection lost, attempting to reconnect...")
+                    if not self.connect():
+                        logger.error("Reconnection failed, waiting before retry...")
+                        time.sleep(30)
+                        continue
+
+                # Short sleep to prevent excessive CPU usage
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("Received interrupt signal, shutting down...")
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+        finally:
+            self.client.loop_stop()
+            self.client.disconnect()
+            logger.info("MQTT Time Publisher + Smart Alerts stopped")
+
+        return 0
+
+def main():
+    """Main entry point"""
+    publisher = TimePublisher()
+    return publisher.run()
+
+if __name__ == "__main__":
+    sys.exit(main())

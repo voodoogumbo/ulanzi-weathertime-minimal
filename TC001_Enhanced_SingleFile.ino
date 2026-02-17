@@ -35,6 +35,22 @@ static const uint8_t BRIGHTNESS_MAX = 100;  // Maximum LED brightness
 // Color Themes
 static CRGB COLOR_DAY = CRGB(255, 255, 255);   // White for day mode
 static CRGB COLOR_NIGHT = CRGB(255, 0, 0);     // Red for night mode
+static CRGB COLOR_RECYCLE = CRGB(0, 255, 0);  // Match MQTT recycle indicator green
+
+// Recycling Schedule Configuration
+static const int RECYCLE_START_YEAR = 2025;
+static const int RECYCLE_START_MONTH = 11;      // November (1-12)
+static const int RECYCLE_START_DAY = 17;        // 17th
+static const int RECYCLE_INTERVAL_DAYS = 14;   // Every 14 days
+
+// Temperature Color System - Diverging scale (ice-blue → white → red)
+static const float T_MIN_F = -20.0f; // Cold floor
+static const float T_MAX_F = 100.0f; // Hot ceiling
+
+// Temperature color constants - bright enough for WS2812
+static const CRGB ICE = CRGB(80, 180, 255);    // Ice blue that's readable
+static const CRGB WHITE = CRGB(255, 255, 255);  // Pure white
+static const CRGB HOT = CRGB(255, 0, 0);       // Pure red
 
 // Page System
 enum PageType { PAGE_CLOCK, PAGE_CALENDAR, PAGE_WEATHER };
@@ -79,6 +95,62 @@ PROGMEM static const LargeGlyph LARGE_DIGITS[10] = {
   {{0b011110,0b100001,0b100001,0b011110,0b100001,0b100001,0b011110},6},
   // 9
   {{0b011110,0b100001,0b100001,0b011111,0b000001,0b000001,0b011110},6}
+};
+
+// Large letters for scrolling text (A-Z) - 5x7 font, matches clock digit height
+PROGMEM static const LargeGlyph LARGE_LETTERS[26] = {
+  // A
+  {{0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001},5},
+  // B
+  {{0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110},5},
+  // C
+  {{0b01110,0b10001,0b10000,0b10000,0b10000,0b10001,0b01110},5},
+  // D
+  {{0b11100,0b10010,0b10001,0b10001,0b10001,0b10010,0b11100},5},
+  // E
+  {{0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111},5},
+  // F
+  {{0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b10000},5},
+  // G
+  {{0b01110,0b10001,0b10000,0b10111,0b10001,0b10001,0b01110},5},
+  // H
+  {{0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001},5},
+  // I
+  {{0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b11111},5},
+  // J
+  {{0b00111,0b00010,0b00010,0b00010,0b00010,0b10010,0b01100},5},
+  // K
+  {{0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001},5},
+  // L
+  {{0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111},5},
+  // M
+  {{0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001},5},
+  // N
+  {{0b10001,0b11001,0b11001,0b10101,0b10011,0b10011,0b10001},5},
+  // O
+  {{0b01110,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110},5},
+  // P
+  {{0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000},5},
+  // Q
+  {{0b01110,0b10001,0b10001,0b10001,0b10101,0b10010,0b01101},5},
+  // R
+  {{0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001},5},
+  // S
+  {{0b01110,0b10001,0b10000,0b01110,0b00001,0b10001,0b01110},5},
+  // T
+  {{0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100},5},
+  // U
+  {{0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110},5},
+  // V
+  {{0b10001,0b10001,0b10001,0b10001,0b01010,0b01010,0b00100},5},
+  // W
+  {{0b10001,0b10001,0b10001,0b10101,0b10101,0b11011,0b10001},5},
+  // X
+  {{0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001},5},
+  // Y
+  {{0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100},5},
+  // Z
+  {{0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111},5}
 };
 
 // Small font for text (A-Z)
@@ -165,13 +237,20 @@ unsigned long pageDurationMs = PAGE_DURATION_MS;
 
 // Notification state
 bool notifyActive = false;
-String notifyText;
+char notifyText[64] = {0};
 CRGB notifyColor = CRGB(255, 255, 0);
 unsigned long notifyEndMs = 0;
+int notifyScrollOffset = 0;
+unsigned long lastScrollMs = 0;
+uint16_t scrollSpeedMs = 80;     // ms per pixel shift (lower = faster)
+int notifyTextWidth = 0;
+bool notifyScrolling = false;
+uint8_t notifyScrollLoops = 0;   // how many times we've fully scrolled
+uint8_t notifyScrollMaxLoops = 2; // default: scroll through twice
 
 // Weather data
-String weatherCondition = "";
-String weatherIcon = "";
+char weatherCondition[24] = {0};
+char weatherIcon[8] = {0};
 float temperature = 0.0;
 unsigned long weatherUpdateIntervalMs = WEATHER_UPDATE_INTERVAL_MS;
 
@@ -225,6 +304,112 @@ bool isNight(const struct tm& timeinfo) {
   return (timeinfo.tm_hour >= 22 || timeinfo.tm_hour < 6);
 }
 
+// Check if current day is a recycling day (Sunday before or Monday of recycling week)
+// Cached: recalculates once per hour instead of every frame
+bool isRecycleDay(const struct tm& timeinfo) {
+  static bool cachedResult = false;
+  static int lastCheckedHour = -1;
+  static int lastCheckedDay = -1;
+
+  // Only recalculate when the hour or day changes
+  if (timeinfo.tm_hour == lastCheckedHour && timeinfo.tm_mday == lastCheckedDay) {
+    return cachedResult;
+  }
+
+  // Create tm structure for the recycling start date
+  struct tm startDate = {0};
+  startDate.tm_year = RECYCLE_START_YEAR - 1900;
+  startDate.tm_mon = RECYCLE_START_MONTH - 1;
+  startDate.tm_mday = RECYCLE_START_DAY;
+  startDate.tm_isdst = -1;
+
+  time_t startTime = mktime(&startDate);
+  struct tm currentDateOnly = timeinfo;
+  currentDateOnly.tm_hour = 0;
+  currentDateOnly.tm_min = 0;
+  currentDateOnly.tm_sec = 0;
+  time_t currentTime = mktime(&currentDateOnly);
+
+  int daysDiff = (currentTime - startTime) / 86400;
+  int dayOfWeek = timeinfo.tm_wday;
+
+  bool isMondayRecycleDay = (dayOfWeek == 1) && (daysDiff % RECYCLE_INTERVAL_DAYS == 0);
+  bool isSundayBeforeRecycle = (dayOfWeek == 0) && ((daysDiff + 1) % RECYCLE_INTERVAL_DAYS == 0);
+
+  cachedResult = isMondayRecycleDay || isSundayBeforeRecycle;
+  lastCheckedHour = timeinfo.tm_hour;
+  lastCheckedDay = timeinfo.tm_mday;
+
+  // Debug logging on each recalculation
+  const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  Serial.printf("Recycle Check - Date: %s %04d-%02d-%02d, Days from start: %d, Cycle day: %d, Recycle: %s\n",
+                dayNames[dayOfWeek],
+                timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                daysDiff, daysDiff % RECYCLE_INTERVAL_DAYS,
+                cachedResult ? "YES (GREEN)" : "no");
+
+  return cachedResult;
+}
+
+// Temperature Color Helper Functions
+
+// Helper: 0..1 → 0..255 fract8 for FastLED blending
+static inline uint8_t u01_to_fract8(float u) {
+  if (u < 0) u = 0; 
+  if (u > 1) u = 1;
+  return (uint8_t)(u * 255.0f + 0.5f);
+}
+
+// Optional: boost cold colors to counteract perceived dimness on WS2812
+static inline CRGB liftCold(const CRGB& c) {
+  uint8_t r = qadd8(c.r, 12);
+  uint8_t g = qadd8(c.g, 12);
+  uint8_t b = qadd8(c.b, 12);
+  return CRGB(r, g, b);
+}
+
+// Brightness compensation helper - boosts color vibrancy when brightness is low
+static CRGB compensateForBrightness(CRGB color, uint8_t brightness) {
+  // No compensation needed at high brightness levels
+  if (brightness >= 60) {
+    return color;
+  }
+  
+  // Calculate compensation factor: more compensation at lower brightness
+  float brightnessFactor = brightness / 100.0f; // Convert to 0-1 range
+  float compensationAmount = (1.0f - brightnessFactor) * 0.4f; // Up to 40% boost
+  
+  // Boost each channel, but preserve color balance
+  uint8_t r = qadd8(color.r, (uint8_t)(compensationAmount * 255));
+  uint8_t g = qadd8(color.g, (uint8_t)(compensationAmount * 255));  
+  uint8_t b = qadd8(color.b, (uint8_t)(compensationAmount * 255));
+  
+  return CRGB(r, g, b);
+}
+
+// Main temperature color mapping function with brightness compensation
+static CRGB tempToColorF(float tF, bool nightMode, uint8_t brightness) {
+  if (nightMode) {
+    return COLOR_NIGHT; // Force red during night hours
+  }
+
+  CRGB baseColor;
+  
+  if (tF <= 0.0f) {
+    // ICE → WHITE over [T_MIN_F .. 0°F]
+    float u = (tF - T_MIN_F) / (0.0f - T_MIN_F); // 0 at T_MIN_F, 1 at 0°F
+    baseColor = blend(ICE, WHITE, u01_to_fract8(u));
+    baseColor = liftCold(baseColor);
+  } else {
+    // WHITE → HOT over [0°F .. T_MAX_F]
+    float u = (tF - 0.0f) / (T_MAX_F - 0.0f);     // 0 at 0°F, 1 at 100°F
+    baseColor = blend(WHITE, HOT, u01_to_fract8(u));
+  }
+  
+  // Apply brightness compensation to maintain color consistency
+  return compensateForBrightness(baseColor, brightness);
+}
+
 // Font Rendering
 // Draw large glyph (6x7 font) with optional bold effect
 void drawLargeGlyph(uint8_t digitIndex, int x, int y, const CRGB& c, bool bold = false) {
@@ -243,6 +428,67 @@ void drawLargeGlyph(uint8_t digitIndex, int x, int y, const CRGB& c, bool bold =
       }
     }
   }
+}
+
+// Draw a large character (letter or digit) using 5x7 / 6x7 font
+void drawLargeChar(char ch, int x, int y, const CRGB& c) {
+  LargeGlyph g;
+
+  if (ch >= '0' && ch <= '9') {
+    memcpy_P(&g, &LARGE_DIGITS[ch - '0'], sizeof(LargeGlyph));
+  } else if (ch >= 'A' && ch <= 'Z') {
+    memcpy_P(&g, &LARGE_LETTERS[ch - 'A'], sizeof(LargeGlyph));
+  } else if (ch >= 'a' && ch <= 'z') {
+    memcpy_P(&g, &LARGE_LETTERS[ch - 'a'], sizeof(LargeGlyph));
+  } else {
+    return; // unsupported character
+  }
+
+  for (uint8_t ry = 0; ry < 7; ++ry) {
+    uint8_t row = g.rows[ry];
+    for (uint8_t rx = 0; rx < g.w; ++rx) {
+      if (row & (1 << (g.w - 1 - rx))) {
+        pset(x + rx, y + ry, c);
+      }
+    }
+  }
+}
+
+// Draw string with large 5x7/6x7 font - supports A-Z, a-z, 0-9
+void drawLargeString(const char* str, int x, int y, const CRGB& c) {
+  int currentX = x;
+  for (int i = 0; str[i] != '\0'; i++) {
+    char ch = str[i];
+    if (ch >= '0' && ch <= '9') {
+      drawLargeChar(ch, currentX, y, c);
+      currentX += 7; // 6px digit + 1px gap
+    } else if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+      drawLargeChar(ch, currentX, y, c);
+      currentX += 6; // 5px letter + 1px gap
+    } else if (ch == ' ') {
+      currentX += 3;
+    } else {
+      currentX += 3; // unknown char spacing
+    }
+  }
+}
+
+// Calculate text width for large font strings
+int getLargeStringWidth(const char* str) {
+  int width = 0;
+  for (int i = 0; str[i] != '\0'; i++) {
+    char ch = str[i];
+    if (ch >= '0' && ch <= '9') {
+      width += 7; // 6px digit + 1px gap
+    } else if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+      width += 6; // 5px letter + 1px gap
+    } else if (ch == ' ') {
+      width += 3;
+    } else {
+      width += 3;
+    }
+  }
+  return width > 0 ? width - 1 : 0; // Remove trailing gap
 }
 
 // Draw small glyph (3x5 font) - safely read from PROGMEM
@@ -282,9 +528,9 @@ void drawSmallDigit(uint8_t digit, int x, int y, const CRGB& c) {
 }
 
 // Draw string with small font - supports A-Z, 0-9
-void drawSmallString(const String& str, int x, int y, const CRGB& c) {
+void drawSmallString(const char* str, int x, int y, const CRGB& c) {
   int currentX = x;
-  for (int i = 0; i < str.length(); i++) {
+  for (int i = 0; str[i] != '\0'; i++) {
     uint8_t ch = str[i];
 
     if (ch >= '0' && ch <= '9') {
@@ -371,6 +617,105 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
           } else {
             // Any other rows (0, 6, 7): Use original color if present
             pixelColor = c;
+          }
+          
+          pset(x + rx, y + ry, pixelColor);
+        }
+      }
+    }
+  } else if (iconIndex == 2) {
+    // Rain cloud gradient: light blue → deep blue (matches rain drops)
+    CRGB lightBlue = CRGB(100, 180, 255);     // Light blue at top
+    CRGB mediumBlue = CRGB(60, 140, 255);     // Medium blue
+    CRGB deepBlue = CRGB(0, 120, 255);        // Deep blue (matches rain drops)
+    
+    for (uint8_t ry = 0; ry < 8; ++ry) {
+      uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
+      for (uint8_t rx = 0; rx < 8; ++rx) {
+        if (row & (1 << (7 - rx))) {
+          CRGB pixelColor;
+          
+          // Apply blue gradient for cloud rows (1-5), rain drops use deepBlue
+          if (ry == 1) {
+            // Row 1 (top): Light blue
+            pixelColor = lightBlue;
+          } else if (ry == 2) {
+            // Row 2: Light blue + rightmost pixel highlight
+            if (rx == 7) {
+              pixelColor = lightBlue; // Right edge highlight
+            } else {
+              pixelColor = CRGB(120, 190, 255); // Slightly lighter blue
+            }
+          } else if (ry == 3) {
+            // Row 3: Medium blue transition
+            if (rx == 7) {
+              pixelColor = mediumBlue; // Right edge transition
+            } else {
+              pixelColor = CRGB(80, 160, 255); // Medium-light blue
+            }
+          } else if (ry == 4) {
+            // Row 4: Medium-deep blue
+            if (rx == 7) {
+              pixelColor = deepBlue; // Right edge shadow
+            } else {
+              pixelColor = mediumBlue;
+            }
+          } else if (ry == 5) {
+            // Row 5 (bottom cloud): Deep blue (matches rain drops)
+            pixelColor = deepBlue;
+          } else {
+            // Rain drop rows (0, 6, 7): Use deep blue for consistency
+            pixelColor = deepBlue;
+          }
+          
+          pset(x + rx, y + ry, pixelColor);
+        }
+      }
+    }
+  } else if (iconIndex == 3) {
+    // Snow cloud gradient: dark gray → white (reverse of cloudy, matches snow)
+    CRGB darkGray = CRGB(60, 60, 60);         // Dark gray at top
+    CRGB mediumGray = CRGB(120, 120, 120);    // Medium gray
+    CRGB lightGray = CRGB(180, 180, 180);     // Light gray
+    CRGB white = CRGB(255, 255, 255);         // White (matches snow)
+    
+    for (uint8_t ry = 0; ry < 8; ++ry) {
+      uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
+      for (uint8_t rx = 0; rx < 8; ++rx) {
+        if (row & (1 << (7 - rx))) {
+          CRGB pixelColor;
+          
+          // Apply reverse gradient for cloud rows (1-5), snow pixels use white
+          if (ry == 1) {
+            // Row 1 (top): Dark gray (storm cloud)
+            pixelColor = darkGray;
+          } else if (ry == 2) {
+            // Row 2: Dark-medium gray + rightmost pixel
+            if (rx == 7) {
+              pixelColor = darkGray; // Right edge consistency
+            } else {
+              pixelColor = CRGB(90, 90, 90); // Dark-medium gray
+            }
+          } else if (ry == 3) {
+            // Row 3: Medium gray transition
+            if (rx == 7) {
+              pixelColor = mediumGray; // Right edge transition
+            } else {
+              pixelColor = CRGB(140, 140, 140); // Medium-light gray
+            }
+          } else if (ry == 4) {
+            // Row 4: Light gray approaching white
+            if (rx == 7) {
+              pixelColor = white; // Right edge becomes white
+            } else {
+              pixelColor = lightGray;
+            }
+          } else if (ry == 5) {
+            // Row 5 (bottom cloud): White (matches snow)
+            pixelColor = white;
+          } else {
+            // Snow pixel rows (0, 6, 7): Use white for consistency
+            pixelColor = white;
           }
           
           pset(x + rx, y + ry, pixelColor);
@@ -490,20 +835,15 @@ void drawClock() {
     return;
   }
 
-  // Timezone debugging - log every minute to track time accuracy
-  static int last_logged_minute = -1;
-  if (timeinfo.tm_min != last_logged_minute) {
-    time_t now = time(nullptr);
-    struct tm utc_tm;
-    gmtime_r(&now, &utc_tm);
-    Serial.printf("Time Debug - UTC: %02d:%02d, Local: %02d:%02d, DST: %s\n",
-                  utc_tm.tm_hour, utc_tm.tm_min,
-                  timeinfo.tm_hour, timeinfo.tm_min,
-                  timeinfo.tm_isdst ? "Yes" : "No");
-    last_logged_minute = timeinfo.tm_min;
+  // Color priority: Recycle Green > Night Red > Day White
+  CRGB col;
+  if (isRecycleDay(timeinfo)) {
+    col = compensateForBrightness(COLOR_RECYCLE, currentBrightness);
+  } else if (isNight(timeinfo)) {
+    col = COLOR_NIGHT;
+  } else {
+    col = COLOR_DAY;
   }
-
-  CRGB col = isNight(timeinfo) ? COLOR_NIGHT : COLOR_DAY;
   FastLED.setBrightness(currentBrightness);
 
   clearAll();
@@ -535,7 +875,12 @@ void drawClock() {
   
   // Add subtle time source indicator in bottom right corner
   if (usingMqttTime) {
-    pset(31, 7, CRGB(0, 255, 0)); // Green pixel for MQTT time
+    // Green on recycle days, royal blue otherwise
+    if (isRecycleDay(timeinfo)) {
+      pset(31, 7, CRGB(0, 255, 0)); // Green pixel for MQTT time on recycle days
+    } else {
+      pset(31, 7, CRGB(0, 64, 255)); // Royal blue pixel for MQTT time
+    }
   } else {
     pset(31, 7, CRGB(0, 100, 255)); // Blue pixel for NTP time
   }
@@ -594,61 +939,44 @@ void drawWeather() {
 
   clearAll();
 
-  // Draw temperature with color scaling from white (0°F) to red (100°F+)
+  // Draw temperature with diverging color scale (ice-blue → white → red)
   int temp = (int)round(temperature);
-  
-  // Calculate temperature color: white at 0°F, red at 100°F+
-  CRGB tempColor;
-  
-  // Override with night mode color during 22:00-06:00
-  if (isNight(timeinfo)) {
-    tempColor = COLOR_NIGHT; // Force red during night hours
-    static bool nightModeLogged = false;
-    if (!nightModeLogged) {
-      Serial.printf("NIGHT MODE TRIGGERED: Temperature forced to red at %02d:%02d\n", 
-                    timeinfo.tm_hour, timeinfo.tm_min);
-      nightModeLogged = true;
-    }
-  } else {
-    static bool nightModeLogged = false;
-    nightModeLogged = false; // Reset for next night
-    if (temp <= 0) {
-      tempColor = CRGB(255, 255, 255); // White for 0 and below
-    } else if (temp >= 100) {
-      tempColor = CRGB(255, 0, 0); // Pure red for 100+ degrees
-    } else {
-      // Smooth transition from white to red based on temperature
-      // At 0°F: (255, 255, 255) -> At 100°F: (255, 0, 0)
-      uint8_t red = 255;
-      uint8_t green = map(temp, 0, 100, 255, 0); // Green decreases as temp increases
-      uint8_t blue = map(temp, 0, 100, 255, 0);  // Blue decreases as temp increases
-      tempColor = CRGB(red, green, blue);
-    }
-  }
-  
+
+  // Use new temperature color mapping with night mode detection and brightness compensation
+  CRGB tempColor = tempToColorF(temperature, isNight(timeinfo), currentBrightness);
+
   // Use large 6x7 digits for temperature with better spacing
   int x = 1;
   int y = 1;
-  
+
+  // Handle negative temperatures - draw minus sign
+  bool negative = (temp < 0);
+  int absTemp = negative ? -temp : temp;
+
+  if (negative) {
+    // Draw minus sign: 4px wide horizontal bar, vertically centered
+    for (int mx = 0; mx < 4; mx++) {
+      pset(x + mx, y + 3, tempColor);
+    }
+    x += 5; // 4px bar + 1px gap
+  }
+
   // Draw temperature digits with color scaling
-  if (temp >= 100) {
-    // Three digits (100+) - rare but handle gracefully
-    drawLargeGlyph(temp / 100, x, y, tempColor, true);
+  if (absTemp >= 100) {
+    drawLargeGlyph(absTemp / 100, x, y, tempColor, true);
     x += DIGIT_SPACING;
-    drawLargeGlyph((temp / 10) % 10, x, y, tempColor, true);
+    drawLargeGlyph((absTemp / 10) % 10, x, y, tempColor, true);
     x += DIGIT_SPACING;
-    drawLargeGlyph(temp % 10, x, y, tempColor, true);
-    x += 6;  // Final digit width only
-  } else if (temp >= 10) {
-    // Two digits (10-99) - most common case
-    drawLargeGlyph(temp / 10, x, y, tempColor, true);
+    drawLargeGlyph(absTemp % 10, x, y, tempColor, true);
+    x += 6;
+  } else if (absTemp >= 10) {
+    drawLargeGlyph(absTemp / 10, x, y, tempColor, true);
     x += DIGIT_SPACING;
-    drawLargeGlyph(temp % 10, x, y, tempColor, true);
-    x += 6;  // Final digit width only
+    drawLargeGlyph(absTemp % 10, x, y, tempColor, true);
+    x += 6;
   } else {
-    // Single digit (0-9)
-    drawLargeGlyph(temp, x, y, tempColor, true);
-    x += 6;  // Final digit width only
+    drawLargeGlyph(absTemp, x, y, tempColor, true);
+    x += 6;
   }
   
   // Draw degree symbol with same color as temperature
@@ -659,9 +987,10 @@ void drawWeather() {
   CRGB iconColor = CRGB(180, 180, 180); // Default to light gray (clouds)
   
   // Use OpenWeather API icon codes to detect day/night variants
-  bool isNightWeather = weatherIcon.endsWith("n");
-  
-  if (weatherCondition == "Clear") {
+  size_t iconLen = strlen(weatherIcon);
+  bool isNightWeather = (iconLen > 0) && (weatherIcon[iconLen - 1] == 'n');
+
+  if (strcmp(weatherCondition, "Clear") == 0) {
     if (isNightWeather) {
       iconIndex = 5;  // Moon icon for clear night
       iconColor = CRGB(200, 220, 255); // Silver-blue for moon
@@ -670,19 +999,19 @@ void drawWeather() {
       iconColor = CRGB(255, 200, 0); // Golden yellow for sun
     }
   }
-  else if (weatherCondition == "Clouds") {
+  else if (strcmp(weatherCondition, "Clouds") == 0) {
     iconIndex = 1;  // Clouds icon
     iconColor = CRGB(180, 180, 180); // Light gray
   }
-  else if (weatherCondition == "Rain" || weatherCondition == "Drizzle") {
+  else if (strcmp(weatherCondition, "Rain") == 0 || strcmp(weatherCondition, "Drizzle") == 0) {
     iconIndex = 2;  // Rain icon
     iconColor = CRGB(0, 120, 255); // Deep blue
   }
-  else if (weatherCondition == "Snow") {
+  else if (strcmp(weatherCondition, "Snow") == 0) {
     iconIndex = 3;  // Snow icon
     iconColor = CRGB(255, 255, 255); // Pure white
   }
-  else if (weatherCondition == "Thunderstorm") {
+  else if (strcmp(weatherCondition, "Thunderstorm") == 0) {
     iconIndex = 4;  // Thunderstorm icon
     iconColor = CRGB(150, 0, 255); // Electric purple
   }
@@ -690,11 +1019,58 @@ void drawWeather() {
   drawWeatherIcon(iconIndex, 24, 0, iconColor);  // Position on right side
 }
 
-// Draw notification overlay
+// Calculate text width for small font strings
+int getSmallStringWidth(const char* str) {
+  int width = 0;
+  for (int i = 0; str[i] != '\0'; i++) {
+    uint8_t ch = str[i];
+    if ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+      width += 4; // 3px character + 1px spacing
+    } else if (ch == ' ') {
+      width += 2;
+    } else {
+      width += 2; // unknown character spacing
+    }
+  }
+  return width > 0 ? width - 1 : 0; // Remove last spacing
+}
+
+// Draw notification overlay with scrolling for long text
 void drawNotify() {
   clearAll();
-  // Simple notification display (reuse small font)
-  drawSmallString(notifyText, 2, 2, notifyColor);
+
+  if (notifyScrolling) {
+    // Scrolling mode: large 5x7 font, vertically centered
+    int y = 0; // 7px tall font on 8px display, start at top
+    unsigned long now = millis();
+    if (now - lastScrollMs >= scrollSpeedMs) {
+      lastScrollMs = now;
+      notifyScrollOffset--;
+
+      // Text has fully scrolled off the left edge
+      if (notifyScrollOffset < -notifyTextWidth) {
+        notifyScrollLoops++;
+        if (notifyScrollLoops >= notifyScrollMaxLoops) {
+          notifyActive = false; // Done scrolling
+          return;
+        }
+        notifyScrollOffset = MW; // Reset: scroll in from the right again
+      }
+    }
+    drawLargeString(notifyText, notifyScrollOffset, y, notifyColor);
+  } else {
+    // Static mode: use large font if it fits, small font otherwise
+    int largeWidth = getLargeStringWidth(notifyText);
+    if (largeWidth <= MW) {
+      int x = (MW - largeWidth) / 2;
+      drawLargeString(notifyText, x, 0, notifyColor);
+    } else {
+      int y = (MH - 5) / 2;
+      int x = (MW - notifyTextWidth) / 2;
+      if (x < 0) x = 0;
+      drawSmallString(notifyText, x, y, notifyColor);
+    }
+  }
 }
 
 
@@ -757,9 +1133,11 @@ void fetchWeatherData() {
 
     if (!error) {
       temperature = doc["main"]["temp"];
-      weatherCondition = doc["weather"][0]["main"].as<String>();
-      weatherIcon = doc["weather"][0]["icon"].as<String>();
-      Serial.printf("Weather updated: %.1fF, %s, icon=%s\n", temperature, weatherCondition.c_str(), weatherIcon.c_str());
+      strncpy(weatherCondition, doc["weather"][0]["main"] | "", sizeof(weatherCondition) - 1);
+      weatherCondition[sizeof(weatherCondition) - 1] = '\0';
+      strncpy(weatherIcon, doc["weather"][0]["icon"] | "", sizeof(weatherIcon) - 1);
+      weatherIcon[sizeof(weatherIcon) - 1] = '\0';
+      Serial.printf("Weather updated: %.1fF, %s, icon=%s\n", temperature, weatherCondition, weatherIcon);
     } else {
       Serial.printf("Weather JSON parse error: %s\n", error.c_str());
     }
@@ -772,21 +1150,41 @@ void fetchWeatherData() {
 // MQTT Command Handlers
 // Handle notification display command
 void handleNotify(const JsonDocument& doc) {
-  notifyText = doc["text"].as<const char*>();
+  strncpy(notifyText, doc["text"] | "", sizeof(notifyText) - 1);
+  notifyText[sizeof(notifyText) - 1] = '\0';
   const char* hex = doc["color"] | "FFFF00";
   unsigned long v = strtoul(hex, nullptr, 16);
   notifyColor = CRGB((v>>16)&0xFF, (v>>8)&0xFF, v&0xFF);
   uint16_t dur = doc["duration"] | 4;
-  notifyEndMs = millis() + dur*1000UL;
+  scrollSpeedMs = doc["speed"] | 80;  // ms per pixel (lower = faster)
+  notifyScrollMaxLoops = doc["repeat"] | 2;
+
+  // Measure text width with large font (used for scrolling and static if it fits)
+  int largeWidth = getLargeStringWidth(notifyText);
+  if (largeWidth > MW) {
+    // Text too wide even for large font: scroll with large font
+    notifyTextWidth = largeWidth;
+    notifyScrolling = true;
+    notifyScrollOffset = MW;  // Enter from the right
+    notifyScrollLoops = 0;
+    lastScrollMs = millis();
+    notifyEndMs = 0; // Scrolling controls its own lifetime
+    Serial.printf("Scroll notify: \"%s\" (%dpx wide, %d loops, %dms/px)\n",
+                  notifyText, notifyTextWidth, notifyScrollMaxLoops, scrollSpeedMs);
+  } else {
+    // Text fits in large font: static display with duration timer
+    notifyTextWidth = getSmallStringWidth(notifyText); // fallback width for small font
+    notifyScrolling = false;
+    notifyEndMs = millis() + dur * 1000UL;
+  }
   notifyActive = true;
 }
 
 // Handle page change command
 void handlePageCommand(const JsonDocument& doc) {
-  String page = doc["page"].as<String>();
-  if (page == "clock") currentPage = PAGE_CLOCK;
-  else if (page == "weather") currentPage = PAGE_WEATHER;
-  // Page timer is now handled locally by render task
+  const char* page = doc["page"] | "";
+  if (strcmp(page, "clock") == 0) currentPage = PAGE_CLOCK;
+  else if (strcmp(page, "weather") == 0) currentPage = PAGE_WEATHER;
 }
 
 // Handle manual brightness setting
@@ -889,8 +1287,14 @@ void ensureMqtt() {
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
   // Feed watchdog at start of MQTT callback to prevent timeouts during processing
   if (wdt_added) esp_task_wdt_reset();
-  
-  char json[len + 1];
+
+  // Reject oversized payloads to prevent stack overflow
+  if (len > 500) {
+    Serial.printf("MQTT payload too large (%u bytes), rejected\n", len);
+    return;
+  }
+
+  char json[512];
   memcpy(json, payload, len);
   json[len] = '\0';
 
@@ -914,21 +1318,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   
   Serial.println("✅ JSON parsed successfully!");
 
-  // Route to handlers using suffix matching (more efficient)
-  String topicStr = String(topic);
-  if (topicStr.endsWith("/notify")) {
+  // Route to handlers using suffix matching (zero-allocation)
+  if (strstr(topic, "/notify")) {
     handleNotify(doc);
-  } else if (topicStr.endsWith("/page")) {
+  } else if (strstr(topic, "/page")) {
     handlePageCommand(doc);
-  } else if (topicStr.endsWith("/brightness")) {
-    handleBrightness(doc);
-  } else if (topicStr.endsWith("/auto_brightness")) {
+  } else if (strstr(topic, "/auto_brightness")) {
     handleAutoBrightness(doc);
-  } else if (topicStr.endsWith("/config")) {
+  } else if (strstr(topic, "/brightness")) {
+    handleBrightness(doc);
+  } else if (strstr(topic, "/config")) {
     handleConfig(doc);
-  } else if (topicStr.endsWith("/weather")) {
+  } else if (strstr(topic, "/weather")) {
     fetchWeatherData();
-  } else if (topicStr.endsWith("/time")) {
+  } else if (strstr(topic, "/time")) {
     handleTimeCommand(doc);
   }
 }
@@ -960,8 +1363,9 @@ void renderTask(void *pvParameters) {
       currentPage = (currentPage == PAGE_CLOCK) ? PAGE_WEATHER : PAGE_CLOCK;
     }
     
-    // Render at 30 FPS (33ms intervals) for smooth display
-    if (currentMs - lastRenderMs >= 33) {
+    // Adaptive frame rate: 20 FPS when scrolling text, 10 FPS otherwise
+    unsigned long frameInterval = (notifyActive && notifyScrolling) ? 50 : 100;
+    if (currentMs - lastRenderMs >= frameInterval) {
       lastRenderMs = currentMs;
       
       // Take display mutex for thread-safe rendering
@@ -975,7 +1379,8 @@ void renderTask(void *pvParameters) {
         // Draw current page or notification
         if (notifyActive) {
           drawNotify();
-          if ((long)(currentMs - notifyEndMs) >= 0) {
+          // Static notifications use timer; scrolling ones end via drawNotify()
+          if (!notifyScrolling && notifyEndMs > 0 && (long)(currentMs - notifyEndMs) >= 0) {
             notifyActive = false;
           }
         } else {

@@ -432,6 +432,21 @@ void drawLargeGlyph(uint8_t digitIndex, int x, int y, const CRGB& c, bool bold =
 
 // Draw a large character (letter or digit) using 5x7 / 6x7 font
 void drawLargeChar(char ch, int x, int y, const CRGB& c) {
+  // Handle punctuation inline (no glyph table entry needed)
+  if (ch == ':') {
+    // 1px wide colon: two dots vertically centered
+    pset(x, y + 2, c);
+    pset(x, y + 4, c);
+    return;
+  }
+  if (ch == '-') {
+    // 3px wide dash at vertical center
+    pset(x, y + 3, c);
+    pset(x + 1, y + 3, c);
+    pset(x + 2, y + 3, c);
+    return;
+  }
+
   LargeGlyph g;
 
   if (ch >= '0' && ch <= '9') {
@@ -454,7 +469,7 @@ void drawLargeChar(char ch, int x, int y, const CRGB& c) {
   }
 }
 
-// Draw string with large 5x7/6x7 font - supports A-Z, a-z, 0-9
+// Draw string with large 5x7/6x7 font - supports A-Z, a-z, 0-9, ':', '-'
 void drawLargeString(const char* str, int x, int y, const CRGB& c) {
   int currentX = x;
   for (int i = 0; str[i] != '\0'; i++) {
@@ -465,6 +480,12 @@ void drawLargeString(const char* str, int x, int y, const CRGB& c) {
     } else if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
       drawLargeChar(ch, currentX, y, c);
       currentX += 6; // 5px letter + 1px gap
+    } else if (ch == ':') {
+      drawLargeChar(ch, currentX, y, c);
+      currentX += 2; // 1px colon + 1px gap
+    } else if (ch == '-') {
+      drawLargeChar(ch, currentX, y, c);
+      currentX += 4; // 3px dash + 1px gap
     } else if (ch == ' ') {
       currentX += 3;
     } else {
@@ -482,6 +503,10 @@ int getLargeStringWidth(const char* str) {
       width += 7; // 6px digit + 1px gap
     } else if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
       width += 6; // 5px letter + 1px gap
+    } else if (ch == ':') {
+      width += 2; // 1px colon + 1px gap
+    } else if (ch == '-') {
+      width += 4; // 3px dash + 1px gap
     } else if (ch == ' ') {
       width += 3;
     } else {
@@ -527,7 +552,7 @@ void drawSmallDigit(uint8_t digit, int x, int y, const CRGB& c) {
   }
 }
 
-// Draw string with small font - supports A-Z, 0-9
+// Draw string with small font - supports A-Z, 0-9, ':', '-'
 void drawSmallString(const char* str, int x, int y, const CRGB& c) {
   int currentX = x;
   for (int i = 0; str[i] != '\0'; i++) {
@@ -542,6 +567,14 @@ void drawSmallString(const char* str, int x, int y, const CRGB& c) {
     } else if (ch >= 'a' && ch <= 'z') {
       drawSmallGlyph(ch - 'a', currentX, y, c);
       currentX += 4;
+    } else if (ch == ':') {
+      pset(currentX, y + 1, c);
+      pset(currentX, y + 3, c);
+      currentX += 2; // 1px colon + 1px gap
+    } else if (ch == '-') {
+      pset(currentX, y + 2, c);
+      pset(currentX + 1, y + 2, c);
+      currentX += 3; // 2px dash + 1px gap
     } else if (ch == ' ') {
       currentX += 2;
     } else {
@@ -572,13 +605,22 @@ void drawBigColon(int x, int y, const CRGB& c) {
 // Draw weather icon (8x8 pixels) with sophisticated cloud gradient
 void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
   if (iconIndex >= 7) return; // bounds check
-  
+
+  // Ensure icon colors stay visible at low brightness levels
+  // FastLED.setBrightness() scales all RGB values down, so grays vanish first
+  uint8_t boost = 0;
+  if (currentBrightness < 15) {
+    boost = map(currentBrightness, 1, 15, 120, 0); // strong boost at very low brightness
+  } else if (currentBrightness < 40) {
+    boost = map(currentBrightness, 15, 40, 40, 0);  // mild boost at medium-low
+  }
+
   // Special sophisticated gradient for cloudy weather (index 1)
   if (iconIndex == 1) {
     // Define gradient colors for natural cloud depth
-    CRGB darkGray = CRGB(60, 60, 60);        // Bottom shadow
-    CRGB lighterGray = CRGB(120, 120, 120);  // Mid-tone
-    CRGB evenLighterGray = CRGB(200, 200, 200); // Top highlight
+    CRGB darkGray = CRGB(60 + boost, 60 + boost, 60 + boost);
+    CRGB lighterGray = CRGB(qadd8(120, boost), qadd8(120, boost), qadd8(120, boost));
+    CRGB evenLighterGray = CRGB(qadd8(200, boost), qadd8(200, boost), qadd8(200, boost));
     
     for (uint8_t ry = 0; ry < 8; ++ry) {
       uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
@@ -595,14 +637,14 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
             if (rx == 7) {
               pixelColor = evenLighterGray; // Right edge highlight
             } else {
-              pixelColor = CRGB(180, 180, 180); // Light gray
+              pixelColor = CRGB(qadd8(180, boost), qadd8(180, boost), qadd8(180, boost));
             }
           } else if (ry == 3) {
             // Row 3: Light gray + rightmost pixel transition
             if (rx == 7) {
               pixelColor = lighterGray; // Right edge transition
             } else {
-              pixelColor = CRGB(180, 180, 180); // Light gray
+              pixelColor = CRGB(qadd8(180, boost), qadd8(180, boost), qadd8(180, boost));
             }
           } else if (ry == 4) {
             // Row 4: Medium gray + rightmost pixel shadow
@@ -625,9 +667,9 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
     }
   } else if (iconIndex == 2) {
     // Rain cloud gradient: light blue → deep blue (matches rain drops)
-    CRGB lightBlue = CRGB(100, 180, 255);     // Light blue at top
-    CRGB mediumBlue = CRGB(60, 140, 255);     // Medium blue
-    CRGB deepBlue = CRGB(0, 120, 255);        // Deep blue (matches rain drops)
+    CRGB lightBlue = CRGB(qadd8(100, boost), qadd8(180, boost), 255);
+    CRGB mediumBlue = CRGB(qadd8(60, boost), qadd8(140, boost), 255);
+    CRGB deepBlue = CRGB(boost, qadd8(120, boost), 255);
     
     for (uint8_t ry = 0; ry < 8; ++ry) {
       uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
@@ -644,14 +686,14 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
             if (rx == 7) {
               pixelColor = lightBlue; // Right edge highlight
             } else {
-              pixelColor = CRGB(120, 190, 255); // Slightly lighter blue
+              pixelColor = CRGB(qadd8(120, boost), qadd8(190, boost), 255);
             }
           } else if (ry == 3) {
             // Row 3: Medium blue transition
             if (rx == 7) {
               pixelColor = mediumBlue; // Right edge transition
             } else {
-              pixelColor = CRGB(80, 160, 255); // Medium-light blue
+              pixelColor = CRGB(qadd8(80, boost), qadd8(160, boost), 255);
             }
           } else if (ry == 4) {
             // Row 4: Medium-deep blue
@@ -674,9 +716,9 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
     }
   } else if (iconIndex == 3) {
     // Snow cloud gradient: dark gray → white (reverse of cloudy, matches snow)
-    CRGB darkGray = CRGB(60, 60, 60);         // Dark gray at top
-    CRGB mediumGray = CRGB(120, 120, 120);    // Medium gray
-    CRGB lightGray = CRGB(180, 180, 180);     // Light gray
+    CRGB darkGray = CRGB(60 + boost, 60 + boost, 60 + boost);
+    CRGB mediumGray = CRGB(qadd8(120, boost), qadd8(120, boost), qadd8(120, boost));
+    CRGB lightGray = CRGB(qadd8(180, boost), qadd8(180, boost), qadd8(180, boost));
     CRGB white = CRGB(255, 255, 255);         // White (matches snow)
     
     for (uint8_t ry = 0; ry < 8; ++ry) {
@@ -694,14 +736,14 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
             if (rx == 7) {
               pixelColor = darkGray; // Right edge consistency
             } else {
-              pixelColor = CRGB(90, 90, 90); // Dark-medium gray
+              pixelColor = CRGB(90 + boost, 90 + boost, 90 + boost);
             }
           } else if (ry == 3) {
             // Row 3: Medium gray transition
             if (rx == 7) {
               pixelColor = mediumGray; // Right edge transition
             } else {
-              pixelColor = CRGB(140, 140, 140); // Medium-light gray
+              pixelColor = CRGB(qadd8(140, boost), qadd8(140, boost), qadd8(140, boost));
             }
           } else if (ry == 4) {
             // Row 4: Light gray approaching white

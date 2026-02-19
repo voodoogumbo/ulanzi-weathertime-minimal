@@ -68,8 +68,8 @@ NWS_USER_AGENT = "(TC001 Clock, github.com/voodoogumbo/ulanzi-weathertime-minima
 BYU_TEAM_ID = "252"
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 BYU_SPORTS = {
-    "basketball": f"{ESPN_BASE}/basketball/mens-college-basketball/teams/{BYU_TEAM_ID}",
-    "football": f"{ESPN_BASE}/football/college-football/teams/{BYU_TEAM_ID}",
+    "basketball": f"{ESPN_BASE}/basketball/mens-college-basketball/scoreboard",
+    "football": f"{ESPN_BASE}/football/college-football/scoreboard",
 }
 SPORTS_CHECK_INTERVAL = 1800    # Check every 30 min normally
 SPORTS_LIVE_INTERVAL = 120      # Check every 2 min during live games
@@ -325,7 +325,7 @@ class TimePublisher:
         )
 
     def check_byu_sports(self):
-        """Check ESPN for BYU game status across football and basketball"""
+        """Check ESPN scoreboard for BYU game status across football and basketball"""
         self.game_is_live = False
 
         for sport_name, url in BYU_SPORTS.items():
@@ -334,13 +334,23 @@ class TimePublisher:
                 with urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read().decode())
 
-                team = data.get("team", {})
-                events = team.get("nextEvent", [])
-                if not events:
+                # Search scoreboard events for BYU's game
+                byu_event = None
+                for event in data.get("events", []):
+                    for comp in event.get("competitions", []):
+                        for c in comp.get("competitors", []):
+                            if str(c.get("team", {}).get("id", "")) == BYU_TEAM_ID:
+                                byu_event = event
+                                break
+                        if byu_event:
+                            break
+                    if byu_event:
+                        break
+
+                if not byu_event:
                     continue
 
-                event = events[0]
-                competition = event.get("competitions", [{}])[0]
+                competition = byu_event.get("competitions", [{}])[0]
                 status = competition.get("status", {})
                 status_type = status.get("type", {})
                 state = status_type.get("name", "")
@@ -361,7 +371,7 @@ class TimePublisher:
                         opp_score = comp.get("score", "0")
                         opp_name = comp.get("team", {}).get("abbreviation", "OPP")
 
-                game_id = event.get("id", "")
+                game_id = byu_event.get("id", "")
 
                 if state == "STATUS_IN_PROGRESS":
                     self.game_is_live = True
@@ -407,7 +417,7 @@ class TimePublisher:
 
                 elif state == "STATUS_SCHEDULED":
                     # Check if game is today — send game day alert
-                    game_date_str = event.get("date", "")
+                    game_date_str = byu_event.get("date", "")
                     if game_date_str:
                         game_utc = datetime.fromisoformat(
                             game_date_str.replace("Z", "+00:00"))

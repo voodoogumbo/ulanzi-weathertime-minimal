@@ -13,6 +13,7 @@
 #include <FastLED.h>
 #include <HTTPClient.h>
 #include <time.h>
+#include <ArduinoOTA.h>
 #include <esp_task_wdt.h>
 #include "config.h"  // User configuration (WiFi, MQTT, OpenWeather API)
 
@@ -247,11 +248,13 @@ unsigned long weatherUpdateIntervalMs = WEATHER_UPDATE_INTERVAL_MS;
 
 // Animation state
 bool colonVisible = true;
+volatile bool displayDirty = true;
 
 // Brightness control
 uint8_t currentBrightness = BRIGHTNESS_DAY;
 
 // MQTT Time Management
+volatile bool weatherFetchRequested = false;
 bool mqttTimeAvailable = false;
 time_t mqttUnixTime = 0;
 unsigned long mqttTimeMs = 0;
@@ -769,14 +772,15 @@ void updateBrightness() {
   if (target != currentBrightness) {
     currentBrightness = target;
     FastLED.setBrightness(currentBrightness);
+    displayDirty = true;
   }
 }
 
 /*********** PAGE RENDERING ***********/
 // Get current time via MQTT
 bool getCurrentTime(struct tm* timeinfo) {
-  if (!mqttTimeAvailable || (millis() - mqttTimeMs) >= 300000) return false;
-
+  // Called from render task (already holds displayMutex) — no extra locking needed
+  if (!mqttTimeAvailable || (millis() - mqttTimeMs) >= 1800000) return false;
   time_t currentTime = mqttUnixTime + ((millis() - mqttTimeMs) / 1000);
   localtime_r(&currentTime, timeinfo);
   return true;
@@ -979,6 +983,7 @@ void drawNotify() {
 void ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
 
+  mqtt.disconnect();  // Invalidate dead socket before WiFi reconnect
   Serial.print("WiFi connecting");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -1024,19 +1029,24 @@ void fetchWeatherData() {
   Serial.printf("Weather API HTTP response: %d\n", httpCode);
 
   if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    Serial.printf("Weather API response length: %d bytes\n", payload.length());
-    
-    StaticJsonDocument<1024> doc;
-    DeserializationError error = deserializeJson(doc, payload);
+    static StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, http.getStream());
 
     if (!error) {
-      temperature = doc["main"]["temp"];
-      strncpy(weatherCondition, doc["weather"][0]["main"] | "", sizeof(weatherCondition) - 1);
-      weatherCondition[sizeof(weatherCondition) - 1] = '\0';
-      strncpy(weatherIcon, doc["weather"][0]["icon"] | "", sizeof(weatherIcon) - 1);
-      weatherIcon[sizeof(weatherIcon) - 1] = '\0';
-      Serial.printf("Weather updated: %.1fF, %s, icon=%s\n", temperature, weatherCondition, weatherIcon);
+      float t = doc["main"]["temp"];
+      char cond[24], icon[8];
+      strncpy(cond, doc["weather"][0]["main"] | "", sizeof(cond) - 1);
+      cond[sizeof(cond) - 1] = '\0';
+      strncpy(icon, doc["weather"][0]["icon"] | "", sizeof(icon) - 1);
+      icon[sizeof(icon) - 1] = '\0';
+      if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50))) {
+        temperature = t;
+        memcpy(weatherCondition, cond, sizeof(weatherCondition));
+        memcpy(weatherIcon, icon, sizeof(weatherIcon));
+        displayDirty = true;
+        xSemaphoreGive(displayMutex);
+      }
+      Serial.printf("Weather updated: %.1fF, %s, icon=%s\n", t, cond, icon);
     } else {
       Serial.printf("Weather JSON parse error: %s\n", error.c_str());
     }
@@ -1049,116 +1059,142 @@ void fetchWeatherData() {
 // MQTT Command Handlers
 // Handle notification display command
 void handleNotify(const JsonDocument& doc) {
-  strncpy(notifyText, doc["text"] | "", sizeof(notifyText) - 1);
-  notifyText[sizeof(notifyText) - 1] = '\0';
+  // Parse into locals first, then commit under mutex
+  char text[64];
+  strncpy(text, doc["text"] | "", sizeof(text) - 1);
+  text[sizeof(text) - 1] = '\0';
   const char* hex = doc["color"] | "FFFF00";
   unsigned long v = strtoul(hex, nullptr, 16);
-  notifyColor = CRGB((v>>16)&0xFF, (v>>8)&0xFF, v&0xFF);
+  CRGB color = CRGB((v>>16)&0xFF, (v>>8)&0xFF, v&0xFF);
   uint16_t dur = doc["duration"] | 4;
-  scrollSpeedMs = doc["speed"] | 80;  // ms per pixel (lower = faster)
-  notifyScrollMaxLoops = doc["repeat"] | 2;
+  uint16_t speed = doc["speed"] | 80;
+  uint8_t maxLoops = doc["repeat"] | 2;
+  int largeWidth = getLargeStringWidth(text);
 
-  // Measure text width with large font (used for scrolling and static if it fits)
-  int largeWidth = getLargeStringWidth(notifyText);
-  if (largeWidth > MW) {
-    // Text too wide even for large font: scroll with large font
-    notifyTextWidth = largeWidth;
-    notifyScrolling = true;
-    notifyScrollOffset = MW;  // Enter from the right
-    notifyScrollLoops = 0;
-    lastScrollMs = millis();
-    notifyEndMs = 0; // Scrolling controls its own lifetime
-    Serial.printf("Scroll notify: \"%s\" (%dpx wide, %d loops, %dms/px)\n",
-                  notifyText, notifyTextWidth, notifyScrollMaxLoops, scrollSpeedMs);
-  } else {
-    // Text fits in large font: static display with duration timer
-    notifyTextWidth = getSmallStringWidth(notifyText); // fallback width for small font
-    notifyScrolling = false;
-    notifyEndMs = millis() + dur * 1000UL;
+  if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50))) {
+    memcpy(notifyText, text, sizeof(notifyText));
+    notifyColor = color;
+    scrollSpeedMs = speed;
+    notifyScrollMaxLoops = maxLoops;
+
+    if (largeWidth > MW) {
+      notifyTextWidth = largeWidth;
+      notifyScrolling = true;
+      notifyScrollOffset = MW;
+      notifyScrollLoops = 0;
+      lastScrollMs = millis();
+      notifyEndMs = 0;
+    } else {
+      notifyTextWidth = getSmallStringWidth(text);
+      notifyScrolling = false;
+      notifyEndMs = millis() + dur * 1000UL;
+    }
+    notifyActive = true;
+    displayDirty = true;
+    xSemaphoreGive(displayMutex);
   }
-  notifyActive = true;
+
+  if (largeWidth > MW) {
+    Serial.printf("Scroll notify: \"%s\" (%dpx wide, %d loops, %dms/px)\n",
+                  text, largeWidth, maxLoops, speed);
+  }
 }
 
 // Handle page change command
 void handlePageCommand(const JsonDocument& doc) {
   const char* page = doc["page"] | "";
-  if (strcmp(page, "clock") == 0) currentPage = PAGE_CLOCK;
-  else if (strcmp(page, "weather") == 0) currentPage = PAGE_WEATHER;
+  PageType newPage = currentPage;
+  if (strcmp(page, "clock") == 0) newPage = PAGE_CLOCK;
+  else if (strcmp(page, "weather") == 0) newPage = PAGE_WEATHER;
+  if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50))) {
+    currentPage = newPage;
+    displayDirty = true;
+    xSemaphoreGive(displayMutex);
+  }
 }
 
 // Handle general configuration settings
 void handleConfig(const JsonDocument& doc) {
-  if (doc.containsKey("page_duration")) {
-    pageDurationMs = (doc["page_duration"].as<uint16_t>()) * 1000UL;
-  }
-  if (doc.containsKey("rotation_enabled")) {
-    rotationEnabled = doc["rotation_enabled"];
-  }
-  if (doc.containsKey("weather_update_minutes")) {
-    weatherUpdateIntervalMs = (doc["weather_update_minutes"].as<uint16_t>()) * 60 * 1000UL;
+  unsigned long newPageDur = pageDurationMs;
+  bool newRotation = rotationEnabled;
+  unsigned long newWeatherInt = weatherUpdateIntervalMs;
+  if (doc.containsKey("page_duration"))
+    newPageDur = (doc["page_duration"].as<uint16_t>()) * 1000UL;
+  if (doc.containsKey("rotation_enabled"))
+    newRotation = doc["rotation_enabled"];
+  if (doc.containsKey("weather_update_minutes"))
+    newWeatherInt = (doc["weather_update_minutes"].as<uint16_t>()) * 60 * 1000UL;
+  if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50))) {
+    pageDurationMs = newPageDur;
+    rotationEnabled = newRotation;
+    weatherUpdateIntervalMs = newWeatherInt;
+    xSemaphoreGive(displayMutex);
   }
 }
 
 // Handle MQTT time updates with Unix timestamps
 void handleTimeCommand(const JsonDocument& doc) {
   if (doc.containsKey("unix_time")) {
-    mqttUnixTime = doc["unix_time"].as<time_t>();
-    mqttTimeMs = millis();
-    mqttTimeAvailable = true;
-    Serial.printf("MQTT time received: %lu (Unix timestamp)\n", mqttUnixTime);
+    time_t t = doc["unix_time"].as<time_t>();
+    unsigned long ms = millis();
+    if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50))) {
+      mqttUnixTime = t;
+      mqttTimeMs = ms;
+      mqttTimeAvailable = true;
+      displayDirty = true;
+      xSemaphoreGive(displayMutex);
+    }
+    Serial.printf("MQTT time received: %lu (Unix timestamp)\n", t);
   }
 }
 
 // MQTT Management
 // Helper function to subscribe to a topic
-bool mqttSubscribe(const char* suffix, bool& allSubscribed) {
+bool mqttSubscribe(const char* suffix, bool& allSubscribed, uint8_t qos = 0) {
   char topic[128];
   snprintf(topic, 128, "%s%s", MQTT_BASE, suffix);
-  if (mqtt.subscribe(topic)) {
-    Serial.printf("✅ Subscribed to: %s\n", topic);
+  if (mqtt.subscribe(topic, qos)) {
+    Serial.printf("Subscribed: %s (QoS %d)\n", topic, qos);
     return true;
   } else {
-    Serial.printf("❌ Failed to subscribe to: %s\n", topic);
+    Serial.printf("Subscribe failed: %s\n", topic);
     allSubscribed = false;
     return false;
   }
 }
 
 void ensureMqtt() {
-  if (mqtt.connected()) return;
-  
+  if (mqtt.connected()) { return; }
+
+  static unsigned long lastAttempt = 0;
+  static unsigned long backoffMs = 0;
+  if (backoffMs > 0 && (millis() - lastAttempt) < backoffMs) return;
+  lastAttempt = millis();
+
   esp_task_wdt_reset();
-  
+
   char cid[24];
   snprintf(cid, 24, "tc001-%llX", ESP.getEfuseMac());
-  Serial.printf("Attempting MQTT connection to %s:%d with client ID: %s\n", MQTT_HOST, MQTT_PORT, cid);
+  Serial.printf("MQTT connecting to %s:%d...\n", MQTT_HOST, MQTT_PORT);
 
-  // Add timeout for MQTT connection attempts to prevent indefinite blocking
-  unsigned long connectStart = millis();
   if (mqtt.connect(cid)) {
-    Serial.println("🎉 MQTT CONNECTED SUCCESSFULLY!");
-    
+    esp_task_wdt_reset();
+    backoffMs = 0;
+    Serial.println("MQTT connected!");
+
     bool allSubscribed = true;
-    
-    // Subscribe to all topics
     mqttSubscribe("/notify", allSubscribed);
     mqttSubscribe("/page", allSubscribed);
     mqttSubscribe("/config", allSubscribed);
     mqttSubscribe("/weather", allSubscribed);
-    mqttSubscribe("/time", allSubscribed);
-    
-    if (allSubscribed) {
-      Serial.println("🔥 ALL MQTT SUBSCRIPTIONS SUCCESSFUL - Ready for messages!");
-    } else {
-      Serial.println("⚠️  Some MQTT subscriptions failed - check broker permissions");
-    }
-    
+    mqttSubscribe("/time", allSubscribed, 1);
+
+    if (!allSubscribed)
+      Serial.println("Some MQTT subscriptions failed");
   } else {
-    Serial.printf("❌ MQTT CONNECTION FAILED - Error code: %d (attempt took %lu ms)\n", mqtt.state(), millis() - connectStart);
-    Serial.println("MQTT Error Codes: -4=timeout, -3=lost, -2=failed, -1=disconnected, 0=bad protocol, 1=bad client ID, 2=unavailable, 3=bad credentials, 4=unauthorized");
-    
-    // Add small delay to prevent rapid retry attempts that could block watchdog
-    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_task_wdt_reset();
+    backoffMs = (backoffMs == 0) ? 2000UL : min(backoffMs * 2, 30000UL);
+    Serial.printf("MQTT failed (err %d), retry in %lus\n", mqtt.state(), backoffMs / 1000);
   }
 }
 
@@ -1190,7 +1226,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   } else if (strstr(topic, "/config")) {
     handleConfig(mqttDoc);
   } else if (strstr(topic, "/weather")) {
-    fetchWeatherData();
+    weatherFetchRequested = true;
   } else if (strstr(topic, "/time")) {
     handleTimeCommand(mqttDoc);
   }
@@ -1213,30 +1249,33 @@ void renderTask(void *pvParameters) {
     if (currentMs - lastBlinkMs > 500) {
       lastBlinkMs = currentMs;
       colonVisible = !colonVisible;
+      displayDirty = true;
     }
-    
-    // Handle page rotation (non-blocking) - only clock and weather pages
+
+    // Handle page rotation (non-blocking)
     if (rotationEnabled && !notifyActive && (currentMs - lastPageChangeMs > pageDurationMs)) {
       lastPageChangeMs = currentMs;
       currentPage = (currentPage == PAGE_CLOCK) ? PAGE_WEATHER : PAGE_CLOCK;
+      displayDirty = true;
     }
-    
-    // Adaptive frame rate: 20 FPS when scrolling text, 10 FPS otherwise
+
+    // Scrolling notifications are always dirty
+    if (notifyActive && notifyScrolling) displayDirty = true;
+
+    // Adaptive frame rate: 20 FPS when scrolling, 10 FPS otherwise
     unsigned long frameInterval = (notifyActive && notifyScrolling) ? 50 : 100;
-    if (currentMs - lastRenderMs >= frameInterval) {
+    if (displayDirty && (currentMs - lastRenderMs >= frameInterval)) {
       lastRenderMs = currentMs;
-      
-      // Take display mutex for thread-safe rendering
+      displayDirty = false;
+
       if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(10))) {
-        // Update brightness based on time of day (checked every frame, cheap comparison)
         updateBrightness();
-        
-        // Draw current page or notification
+
         if (notifyActive) {
           drawNotify();
-          // Static notifications use timer; scrolling ones end via drawNotify()
           if (!notifyScrolling && notifyEndMs > 0 && (long)(currentMs - notifyEndMs) >= 0) {
             notifyActive = false;
+            displayDirty = true;
           }
         } else {
           switch (currentPage) {
@@ -1248,7 +1287,7 @@ void renderTask(void *pvParameters) {
               break;
           }
         }
-        
+
         FastLED.show();
         xSemaphoreGive(displayMutex);
       }
@@ -1269,13 +1308,15 @@ void networkTask(void *pvParameters) {
     esp_task_wdt_reset();
 
     ensureWifi();
+    ArduinoOTA.handle();
     ensureMqtt();
     mqtt.loop();
 
     esp_task_wdt_reset();
 
     unsigned long currentMs = millis();
-    if (currentMs - lastWeatherCheck > weatherUpdateIntervalMs) {
+    if (weatherFetchRequested || (currentMs - lastWeatherCheck > weatherUpdateIntervalMs)) {
+      weatherFetchRequested = false;
       lastWeatherCheck = currentMs;
       fetchWeatherData();
       esp_task_wdt_reset();
@@ -1291,10 +1332,17 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\n=== TC001 Enhanced Clock Starting (Single File Version) ===");
 
+  // Create display mutex first — needed by getCurrentTime() and handlers
+  displayMutex = xSemaphoreCreateMutex();
+  if (displayMutex == NULL) {
+    Serial.println("Failed to create display mutex!");
+    while (1) delay(1000);
+  }
+
   // Initialize LED matrix
   Serial.println("Initializing LED matrix...");
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
-  
+
   // Startup message: show LaMetric watchdog icon
   Serial.println("Showing watchdog boot icon...");
   drawWatchdogBootIcon();
@@ -1315,6 +1363,15 @@ void setup() {
   // Initialize network
   ensureWifi();
 
+  // Configure OTA updates
+  ArduinoOTA.setHostname("tc001-clock");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.onStart([]() { Serial.println("OTA update starting..."); });
+  ArduinoOTA.onEnd([]() { Serial.println("\nOTA update complete!"); });
+  ArduinoOTA.onError([](ota_error_t error) { Serial.printf("OTA error: %u\n", error); });
+  ArduinoOTA.begin();
+  Serial.println("OTA ready (tc001-clock)");
+
   // Allow network stack to fully initialize
   Serial.println("Allowing network to stabilize...");
   for (int i = 0; i < 10; i++) {
@@ -1334,13 +1391,6 @@ void setup() {
   // Initial weather fetch
   Serial.println("Fetching initial weather data...");
   fetchWeatherData();
-  
-  // Create display mutex for thread-safe operations
-  displayMutex = xSemaphoreCreateMutex();
-  if (displayMutex == NULL) {
-    Serial.println("Failed to create display mutex!");
-    while (1) delay(1000);
-  }
   
   // Configure watchdog timer - only watch our tasks, not idle cores
   if (!wdt_added) {
@@ -1393,28 +1443,7 @@ void setup() {
   Serial.println("=== Dual-core setup complete ===");
 }
 
-// Arduino Loop
+// Arduino Loop — tasks handle everything, watchdog handles recovery
 void loop() {
-  // In dual-core mode, the main loop just monitors system health
-  // All rendering and network operations are handled by dedicated tasks
-  
-  // Monitor task health and provide emergency fallback
-  if (renderTaskHandle != NULL && eTaskGetState(renderTaskHandle) == eDeleted) {
-    Serial.println("⚠️ Render task died! Attempting restart...");
-    xTaskCreatePinnedToCore(renderTask, "RenderTask", 4096, NULL, 2, &renderTaskHandle, 1);
-    if (renderTaskHandle != NULL) {
-      esp_task_wdt_add(renderTaskHandle);
-    }
-  }
-  
-  if (networkTaskHandle != NULL && eTaskGetState(networkTaskHandle) == eDeleted) {
-    Serial.println("⚠️ Network task died! Attempting restart...");
-    xTaskCreatePinnedToCore(networkTask, "NetworkTask", 8192, NULL, 1, &networkTaskHandle, 0);
-    if (networkTaskHandle != NULL) {
-      esp_task_wdt_add(networkTaskHandle);
-    }
-  }
-  
-  // Main loop runs every 5 seconds for system monitoring
-  vTaskDelay(pdMS_TO_TICKS(5000));
+  vTaskDelay(portMAX_DELAY);
 }

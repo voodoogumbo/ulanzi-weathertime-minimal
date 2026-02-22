@@ -4,7 +4,7 @@
   cloud gradients, dual-core FreeRTOS, Mountain Time DST support
   
   Setup: Copy config.h.example → config.h, configure, upload
-  MQTT Topics: notify, page, brightness, auto_brightness, config, weather, time
+  MQTT Topics: notify, page, config, weather, time
 */
 
 #include <WiFi.h>
@@ -25,12 +25,9 @@ static const uint16_t NUM_LEDS = MW * MH;  // Total LEDs
 #define LED_TYPE WS2812B                    // LED chip type
 #define COLOR_ORDER GRB                     // Color channel order
 
-// Ambient Sensor Configuration
-#define AMBIENT_SENSOR_PIN 35               // Light sensor (GPIO35)
-static const uint16_t AMBIENT_MIN = 0;      // Minimum sensor reading (very dark)
-static const uint16_t AMBIENT_MAX = 4095;   // Maximum sensor reading (very bright)
-static const uint8_t BRIGHTNESS_MIN = 1;    // Minimum LED brightness
-static const uint8_t BRIGHTNESS_MAX = 100;  // Maximum LED brightness
+// Time-based Brightness
+static const uint8_t BRIGHTNESS_DAY = 85;   // 6:30 AM – 10:00 PM
+static const uint8_t BRIGHTNESS_NIGHT = 4;  // 10:00 PM – 6:30 AM
 
 // Color Themes
 static CRGB COLOR_DAY = CRGB(255, 255, 255);   // White for day mode
@@ -53,12 +50,12 @@ static const CRGB WHITE = CRGB(255, 255, 255);  // Pure white
 static const CRGB HOT = CRGB(255, 0, 0);       // Pure red
 
 // Page System
-enum PageType { PAGE_CLOCK, PAGE_CALENDAR, PAGE_WEATHER };
+enum PageType { PAGE_CLOCK, PAGE_WEATHER };
 
 // Timing Configuration
 static const unsigned long PAGE_DURATION_MS = 10000;        // 10 seconds per page
 static const unsigned long WEATHER_UPDATE_INTERVAL_MS = 900000; // 15 minutes
-static const unsigned long AMBIENT_READ_INTERVAL_MS = 1000;     // 1 second
+
 
 // Clock Display Layout (AWTRIX TMODE5 style)
 static const int DIGIT_W = 6;      // Digit width in pixels
@@ -66,91 +63,91 @@ static const int COLON_W = 2;      // Colon width in pixels
 static const int GAP = 1;          // Spacing between elements
 
 // Temperature Display Layout
-static const int DIGIT_SPACING = 8;  // 6px glyph + 2px gap for readability
+static const int DIGIT_SPACING = 7;  // 6px glyph + 1px gap
 
 // Font Data
-struct LargeGlyph { uint8_t rows[7]; uint8_t w; };
+struct LargeGlyph { uint8_t rows[8]; uint8_t w; };
 struct SmallGlyph { uint8_t rows[5]; uint8_t w; };
 struct SmallDigit { uint8_t rows[5]; uint8_t w; };
 
-// Large digits for clock display (0-9)
+// Large digits for clock display (0-9) - retro 2px-stroke font, 6px wide, 8 rows
 PROGMEM static const LargeGlyph LARGE_DIGITS[10] = {
   // 0
-  {{0b011110,0b100001,0b100001,0b100001,0b100001,0b100001,0b011110},6},
-  // 1  
-  {{0b001000,0b011000,0b001000,0b001000,0b001000,0b001000,0b111110},6},
+  {{0b011110,0b110011,0b110011,0b110011,0b110011,0b110011,0b011110,0b000000},6},
+  // 1
+  {{0b001100,0b011100,0b001100,0b001100,0b001100,0b001100,0b011110,0b000000},6},
   // 2
-  {{0b011110,0b100001,0b000001,0b000010,0b001100,0b110000,0b111111},6},
+  {{0b011110,0b110011,0b000011,0b000110,0b001100,0b011000,0b111111,0b000000},6},
   // 3
-  {{0b011110,0b100001,0b000001,0b001110,0b000001,0b100001,0b011110},6},
+  {{0b011110,0b110011,0b000011,0b001110,0b000011,0b110011,0b011110,0b000000},6},
   // 4
-  {{0b000110,0b001010,0b010010,0b100010,0b111111,0b000010,0b000010},6},
+  {{0b000110,0b001110,0b011110,0b110110,0b111111,0b000110,0b001111,0b000000},6},
   // 5
-  {{0b111111,0b100000,0b111110,0b000001,0b000001,0b100001,0b011110},6},
+  {{0b111111,0b110000,0b111110,0b000011,0b000011,0b110011,0b011110,0b000000},6},
   // 6
-  {{0b011110,0b100000,0b100000,0b111110,0b100001,0b100001,0b011110},6},
+  {{0b001110,0b011000,0b110000,0b111110,0b110011,0b110011,0b011110,0b000000},6},
   // 7
-  {{0b111111,0b000001,0b000010,0b000100,0b001000,0b010000,0b100000},6},
+  {{0b111111,0b000011,0b000110,0b001100,0b011000,0b011000,0b011000,0b000000},6},
   // 8
-  {{0b011110,0b100001,0b100001,0b011110,0b100001,0b100001,0b011110},6},
+  {{0b011110,0b110011,0b110011,0b011110,0b110011,0b110011,0b011110,0b000000},6},
   // 9
-  {{0b011110,0b100001,0b100001,0b011111,0b000001,0b000001,0b011110},6}
+  {{0b011110,0b110011,0b110011,0b011111,0b000011,0b000110,0b011100,0b000000},6}
 };
 
-// Large letters for scrolling text (A-Z) - 5x7 font, matches clock digit height
+// Large letters for scrolling text (A-Z) - 5x8 font, matches clock digit height
 PROGMEM static const LargeGlyph LARGE_LETTERS[26] = {
   // A
-  {{0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001},5},
+  {{0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001,0b00000},5},
   // B
-  {{0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110},5},
+  {{0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110,0b00000},5},
   // C
-  {{0b01110,0b10001,0b10000,0b10000,0b10000,0b10001,0b01110},5},
+  {{0b01110,0b10001,0b10000,0b10000,0b10000,0b10001,0b01110,0b00000},5},
   // D
-  {{0b11100,0b10010,0b10001,0b10001,0b10001,0b10010,0b11100},5},
+  {{0b11100,0b10010,0b10001,0b10001,0b10001,0b10010,0b11100,0b00000},5},
   // E
-  {{0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111},5},
+  {{0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111,0b00000},5},
   // F
-  {{0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b10000},5},
+  {{0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b10000,0b00000},5},
   // G
-  {{0b01110,0b10001,0b10000,0b10111,0b10001,0b10001,0b01110},5},
+  {{0b01110,0b10001,0b10000,0b10111,0b10001,0b10001,0b01110,0b00000},5},
   // H
-  {{0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001},5},
+  {{0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001,0b00000},5},
   // I
-  {{0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b11111},5},
+  {{0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b11111,0b00000},5},
   // J
-  {{0b00111,0b00010,0b00010,0b00010,0b00010,0b10010,0b01100},5},
+  {{0b00111,0b00010,0b00010,0b00010,0b00010,0b10010,0b01100,0b00000},5},
   // K
-  {{0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001},5},
+  {{0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001,0b00000},5},
   // L
-  {{0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111},5},
+  {{0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111,0b00000},5},
   // M
-  {{0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001},5},
+  {{0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001,0b00000},5},
   // N
-  {{0b10001,0b11001,0b11001,0b10101,0b10011,0b10011,0b10001},5},
+  {{0b10001,0b11001,0b11001,0b10101,0b10011,0b10011,0b10001,0b00000},5},
   // O
-  {{0b01110,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110},5},
+  {{0b01110,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110,0b00000},5},
   // P
-  {{0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000},5},
+  {{0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000,0b00000},5},
   // Q
-  {{0b01110,0b10001,0b10001,0b10001,0b10101,0b10010,0b01101},5},
+  {{0b01110,0b10001,0b10001,0b10001,0b10101,0b10010,0b01101,0b00000},5},
   // R
-  {{0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001},5},
+  {{0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001,0b00000},5},
   // S
-  {{0b01110,0b10001,0b10000,0b01110,0b00001,0b10001,0b01110},5},
+  {{0b01110,0b10001,0b10000,0b01110,0b00001,0b10001,0b01110,0b00000},5},
   // T
-  {{0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100},5},
+  {{0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100,0b00000},5},
   // U
-  {{0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110},5},
+  {{0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110,0b00000},5},
   // V
-  {{0b10001,0b10001,0b10001,0b10001,0b01010,0b01010,0b00100},5},
+  {{0b10001,0b10001,0b10001,0b10001,0b01010,0b01010,0b00100,0b00000},5},
   // W
-  {{0b10001,0b10001,0b10001,0b10101,0b10101,0b11011,0b10001},5},
+  {{0b10001,0b10001,0b10001,0b10101,0b10101,0b11011,0b10001,0b00000},5},
   // X
-  {{0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001},5},
+  {{0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001,0b00000},5},
   // Y
-  {{0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100},5},
+  {{0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100,0b00000},5},
   // Z
-  {{0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111},5}
+  {{0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111,0b00000},5}
 };
 
 // Small font for text (A-Z)
@@ -205,20 +202,14 @@ PROGMEM static const uint8_t WEATHER_ICONS[][8] = {
   {0b00000000,0b00111100,0b01111110,0b11111111,0b11111111,0b01111110,0b00000000,0b00000000},
   // Rain
   {0b00111100,0b01111110,0b11111111,0b01111110,0b01010101,0b10101010,0b01010101,0b10101010},
-  // Snow
-  {0b00111100,0b01111110,0b11111111,0b01111110,0b10101010,0b01010101,0b10101010,0b01010101},
+  // Snow (snowman)
+  {0b01111000,0b10110100,0b11111100,0b11111100,0b11101110,0b11111100,0b11101100,0b01111000},
   // Thunderstorm
   {0b00111100,0b01111110,0b11111111,0b01111110,0b00010000,0b00110000,0b01100000,0b11000000},
   // Clear night (crescent moon)
-  {0b00011000,0b00111000,0b01111000,0b01111000,0b01111000,0b01111000,0b00111000,0b00011000},
-  // Watchdog icon (index 6) - LaMetric style dog face
-  {0b01100110,0b11111111,0b11011011,0b11111111,0b11111111,0b01111110,0b01011010,0b00111100}
-};
-
-// Month abbreviations for calendar display
-const char* const MONTH_NAMES[12] PROGMEM = {
-  "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
+  {0b00111100,0b01100010,0b11100000,0b11100000,0b11110001,0b01111110,0b00111100,0b00000000},
+  // Boot icon - pixel skull
+  {0b01111110,0b01111111,0b10010011,0b10010011,0b01101111,0b01111100,0b01010100,0b00000000}
 };
 
 // Global State
@@ -258,16 +249,12 @@ unsigned long weatherUpdateIntervalMs = WEATHER_UPDATE_INTERVAL_MS;
 bool colonVisible = true;
 
 // Brightness control
-bool autoBrightnessEnabled = true;
-uint8_t manualBrightness = 24;
-uint8_t currentBrightness = 24;
-unsigned long lastAmbientReadMs = 0;
+uint8_t currentBrightness = BRIGHTNESS_DAY;
 
 // MQTT Time Management
 bool mqttTimeAvailable = false;
 time_t mqttUnixTime = 0;
 unsigned long mqttTimeMs = 0;
-bool useMqttTime = true;
 
 // FreeRTOS task handles
 TaskHandle_t renderTaskHandle = NULL;
@@ -336,17 +323,13 @@ bool isRecycleDay(const struct tm& timeinfo) {
   bool isMondayRecycleDay = (dayOfWeek == 1) && (daysDiff % RECYCLE_INTERVAL_DAYS == 0);
   bool isSundayBeforeRecycle = (dayOfWeek == 0) && ((daysDiff + 1) % RECYCLE_INTERVAL_DAYS == 0);
 
-  cachedResult = isMondayRecycleDay || isSundayBeforeRecycle;
+  bool newResult = isMondayRecycleDay || isSundayBeforeRecycle;
+  if (newResult != cachedResult) {
+    Serial.printf("Recycle status: %s\n", newResult ? "YES" : "NO");
+  }
+  cachedResult = newResult;
   lastCheckedHour = timeinfo.tm_hour;
   lastCheckedDay = timeinfo.tm_mday;
-
-  // Debug logging on each recalculation
-  const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-  Serial.printf("Recycle Check - Date: %s %04d-%02d-%02d, Days from start: %d, Cycle day: %d, Recycle: %s\n",
-                dayNames[dayOfWeek],
-                timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                daysDiff, daysDiff % RECYCLE_INTERVAL_DAYS,
-                cachedResult ? "YES (GREEN)" : "no");
 
   return cachedResult;
 }
@@ -411,26 +394,24 @@ static CRGB tempToColorF(float tF, bool nightMode, uint8_t brightness) {
 }
 
 // Font Rendering
-// Draw large glyph (6x7 font) with optional bold effect
-void drawLargeGlyph(uint8_t digitIndex, int x, int y, const CRGB& c, bool bold = false) {
+// Draw large digit glyph (6x8 retro font)
+void drawLargeGlyph(uint8_t digitIndex, int x, int y, const CRGB& c) {
   if (digitIndex >= 10) return;
-  
+
   LargeGlyph g;
   memcpy_P(&g, &LARGE_DIGITS[digitIndex], sizeof(LargeGlyph));
-  
-  for (uint8_t ry = 0; ry < 7; ++ry) {
+
+  for (uint8_t ry = 0; ry < 8; ++ry) {
     uint8_t row = g.rows[ry];
     for (uint8_t rx = 0; rx < g.w; ++rx) {
-      bool on = row & (1 << (5 - rx));
-      bool left_on = bold && (rx > 0) && (row & (1 << (5 - (rx - 1))));
-      if (on || left_on) {
+      if (row & (1 << (5 - rx))) {
         pset(x + rx, y + ry, c);
       }
     }
   }
 }
 
-// Draw a large character (letter or digit) using 5x7 / 6x7 font
+// Draw a large character (letter or digit) using 5x8 / 6x8 font
 void drawLargeChar(char ch, int x, int y, const CRGB& c) {
   // Handle punctuation inline (no glyph table entry needed)
   if (ch == ':') {
@@ -459,7 +440,7 @@ void drawLargeChar(char ch, int x, int y, const CRGB& c) {
     return; // unsupported character
   }
 
-  for (uint8_t ry = 0; ry < 7; ++ry) {
+  for (uint8_t ry = 0; ry < 8; ++ry) {
     uint8_t row = g.rows[ry];
     for (uint8_t rx = 0; rx < g.w; ++rx) {
       if (row & (1 << (g.w - 1 - rx))) {
@@ -469,7 +450,7 @@ void drawLargeChar(char ch, int x, int y, const CRGB& c) {
   }
 }
 
-// Draw string with large 5x7/6x7 font - supports A-Z, a-z, 0-9, ':', '-'
+// Draw string with large 5x8/6x8 font - supports A-Z, a-z, 0-9, ':', '-'
 void drawLargeString(const char* str, int x, int y, const CRGB& c) {
   int currentX = x;
   for (int i = 0; str[i] != '\0'; i++) {
@@ -715,52 +696,28 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
       }
     }
   } else if (iconIndex == 3) {
-    // Snow cloud gradient: dark gray → white (reverse of cloudy, matches snow)
-    CRGB darkGray = CRGB(60 + boost, 60 + boost, 60 + boost);
-    CRGB mediumGray = CRGB(qadd8(120, boost), qadd8(120, boost), qadd8(120, boost));
-    CRGB lightGray = CRGB(qadd8(180, boost), qadd8(180, boost), qadd8(180, boost));
-    CRGB white = CRGB(255, 255, 255);         // White (matches snow)
-    
+    // Snowman: white body, red scarf (row 3 + trailing pixel on row 4)
+    CRGB red = CRGB(255, 0, 0);
     for (uint8_t ry = 0; ry < 8; ++ry) {
       uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
       for (uint8_t rx = 0; rx < 8; ++rx) {
         if (row & (1 << (7 - rx))) {
-          CRGB pixelColor;
-          
-          // Apply reverse gradient for cloud rows (1-5), snow pixels use white
-          if (ry == 1) {
-            // Row 1 (top): Dark gray (storm cloud)
-            pixelColor = darkGray;
-          } else if (ry == 2) {
-            // Row 2: Dark-medium gray + rightmost pixel
-            if (rx == 7) {
-              pixelColor = darkGray; // Right edge consistency
-            } else {
-              pixelColor = CRGB(90 + boost, 90 + boost, 90 + boost);
-            }
-          } else if (ry == 3) {
-            // Row 3: Medium gray transition
-            if (rx == 7) {
-              pixelColor = mediumGray; // Right edge transition
-            } else {
-              pixelColor = CRGB(qadd8(140, boost), qadd8(140, boost), qadd8(140, boost));
-            }
-          } else if (ry == 4) {
-            // Row 4: Light gray approaching white
-            if (rx == 7) {
-              pixelColor = white; // Right edge becomes white
-            } else {
-              pixelColor = lightGray;
-            }
-          } else if (ry == 5) {
-            // Row 5 (bottom cloud): White (matches snow)
-            pixelColor = white;
+          if (ry == 3 || (ry == 4 && rx == 6)) {
+            pset(x + rx, y + ry, red);  // Scarf
           } else {
-            // Snow pixel rows (0, 6, 7): Use white for consistency
-            pixelColor = white;
+            pset(x + rx, y + ry, CRGB(255, 255, 255));  // Body
           }
-          
-          pset(x + rx, y + ry, pixelColor);
+        }
+      }
+    }
+  } else if (iconIndex == 4) {
+    // Thunderstorm: purple cloud, yellow lightning bolt (rows 4-7)
+    CRGB yellow = CRGB(255, 255, 0);
+    for (uint8_t ry = 0; ry < 8; ++ry) {
+      uint8_t row = pgm_read_byte(&WEATHER_ICONS[iconIndex][ry]);
+      for (uint8_t rx = 0; rx < 8; ++rx) {
+        if (row & (1 << (7 - rx))) {
+          pset(x + rx, y + ry, (ry >= 4) ? yellow : c);
         }
       }
     }
@@ -777,13 +734,15 @@ void drawWeatherIcon(uint8_t iconIndex, int x, int y, const CRGB& c) {
   }
 }
 
-// Draw watchdog boot icon (LaMetric style)
+// Draw skull boot icon
 void drawWatchdogBootIcon() {
   clearAll();
-  
-  // Display watchdog icon (index 6) in LaMetric orange
-  CRGB laMetricOrange = CRGB(255, 140, 0); // LaMetric signature orange
-  drawWeatherIcon(6, 12, 0, laMetricOrange); // Centered on 32x8 display
+
+  drawWeatherIcon(6, 12, 0, CRGB(255, 255, 255));
+
+  // Gray glint on bottom-left pixel of each eye
+  pset(12 + 1, 3, CRGB(100, 100, 100));
+  pset(12 + 4, 3, CRGB(100, 100, 100));
   
   FastLED.setBrightness(80); // Bright for boot message
   FastLED.show();
@@ -795,189 +754,88 @@ void drawWatchdogBootIcon() {
   if (wdt_added) esp_task_wdt_reset();
 }
 
-// Brightness Control
-// Read ambient sensor and map to brightness value
-uint8_t readAmbientBrightness() {
-  uint16_t ambientReading = analogRead(AMBIENT_SENSOR_PIN);
-  
-  // Apply smoothing (simple moving average with previous reading)
-  static uint16_t prevReading = 2048; // Initialize to mid-range
-  ambientReading = (ambientReading + prevReading) / 2;
-  prevReading = ambientReading;
-  
-  // Map ambient reading to brightness range with some curve adjustment
-  uint8_t brightness;
-  if (ambientReading < 500) {
-    brightness = BRIGHTNESS_MIN;
-  } else if (ambientReading > 3500) {
-    brightness = BRIGHTNESS_MAX;
-  } else {
-    brightness = map(ambientReading, 500, 3500, BRIGHTNESS_MIN + 5, BRIGHTNESS_MAX - 10);
-  }
-  
-  return constrain(brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX);
-}
-
-// Update display brightness based on ambient sensor only
+// Time-based brightness: 85 day, 8 night (checked every 60s)
 void updateBrightness() {
-  if (autoBrightnessEnabled) {
-    currentBrightness = readAmbientBrightness();
-  } else {
-    currentBrightness = manualBrightness;
+  static unsigned long lastUpdateMs = 0;
+  if (millis() - lastUpdateMs < 60000 && lastUpdateMs != 0) return;
+  lastUpdateMs = millis();
+
+  struct tm timeinfo;
+  if (!getCurrentTime(&timeinfo)) return;
+
+  int minuteOfDay = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+  uint8_t target = (minuteOfDay >= 390 && minuteOfDay < 1320)
+                   ? BRIGHTNESS_DAY : BRIGHTNESS_NIGHT;
+  if (target != currentBrightness) {
+    currentBrightness = target;
+    FastLED.setBrightness(currentBrightness);
   }
-  // Note: Time-based night mode affects text COLOR only, not LED brightness
-  // Night mode color logic is handled in individual display functions
 }
 
 /*********** PAGE RENDERING ***********/
-// Get current time - MQTT time only (NTP removed for performance)
-bool getCurrentTime(struct tm* timeinfo, bool* usingMqttTime) {
-  *usingMqttTime = false;
-  
-  // Check if MQTT time is available and recent (within last 5 minutes)
-  if (useMqttTime && mqttTimeAvailable && 
-      (millis() - mqttTimeMs) < 300000) {  // 5 minutes = 300000ms
-    
-    // Calculate current time based on MQTT timestamp + elapsed time
-    time_t currentTime = mqttUnixTime + ((millis() - mqttTimeMs) / 1000);
-    
-    // Convert to local time (timezone already set during setup)
-    localtime_r(&currentTime, timeinfo);
-    
-    // Debug time calculation every minute
-    static int lastDebugMinute = -1;
-    if (timeinfo->tm_min != lastDebugMinute) {
-      struct tm utc_tm;
-      gmtime_r(&currentTime, &utc_tm);
-      Serial.printf("Time Debug - UTC: %02d:%02d, Local: %02d:%02d, Night Mode: %s\n",
-                    utc_tm.tm_hour, utc_tm.tm_min,
-                    timeinfo->tm_hour, timeinfo->tm_min,
-                    isNight(*timeinfo) ? "YES" : "NO");
-      lastDebugMinute = timeinfo->tm_min;
-    }
-    
-    *usingMqttTime = true;
-    return true;
-  }
-  
-  // No time available - MQTT time required
-  return false;
+// Get current time via MQTT
+bool getCurrentTime(struct tm* timeinfo) {
+  if (!mqttTimeAvailable || (millis() - mqttTimeMs) >= 300000) return false;
+
+  time_t currentTime = mqttUnixTime + ((millis() - mqttTimeMs) / 1000);
+  localtime_r(&currentTime, timeinfo);
+  return true;
 }
 
 // Draw main clock page with full-width AWTRIX TMODE5 style
 void drawClock() {
   struct tm timeinfo;
-  bool usingMqttTime;
-  if (!getCurrentTime(&timeinfo, &usingMqttTime)) {
-    // No MQTT time available, show error message
+  if (!getCurrentTime(&timeinfo)) {
     clearAll();
-    CRGB col = COLOR_DAY;
-    FastLED.setBrightness(currentBrightness);
-    drawSmallString("NO TIME", 6, 2, col);
+    drawSmallString("NO TIME", 6, 2, COLOR_DAY);
     return;
   }
 
   // Color priority: Recycle Green > Night Red > Day White
   CRGB col;
   if (isRecycleDay(timeinfo)) {
-    col = compensateForBrightness(COLOR_RECYCLE, currentBrightness);
+    col = COLOR_RECYCLE;
   } else if (isNight(timeinfo)) {
     col = COLOR_NIGHT;
   } else {
     col = COLOR_DAY;
   }
-  FastLED.setBrightness(currentBrightness);
 
   clearAll();
 
-  // AWTRIX TMODE5-style layout: bold digits, full 32-pixel width
+  // AWTRIX TMODE5-style layout: retro digits, full 32-pixel width
   int hour = timeinfo.tm_hour;
   int minute = timeinfo.tm_min;
 
-  // Perfect 32-pixel width: 6×4 digits + 2×2 gaps + 2×1 colon = 32 pixels
-  int x = 0;  // start at left edge for full width
-  int y = 0;  // start at top
+  int x = 1;
+  int y = 0;
 
-  // Draw HH with bold digits
-  drawLargeGlyph(hour / 10, x, y, col, true);     
+  // Draw HH:MM with retro digits
+  drawLargeGlyph(hour / 10, x, y, col);
   x += DIGIT_W + GAP;
-  drawLargeGlyph(hour % 10, x, y, col, true);     
+  drawLargeGlyph(hour % 10, x, y, col);
   x += DIGIT_W + GAP;
 
-  // Draw big colon (blinking) - 2x2 dot blocks
   if (colonVisible) {
     drawBigColon(x, y, col);
   }
   x += COLON_W + GAP;
 
-  // Draw MM with bold digits
-  drawLargeGlyph(minute / 10, x, y, col, true);   
+  drawLargeGlyph(minute / 10, x, y, col);
   x += DIGIT_W + GAP;
-  drawLargeGlyph(minute % 10, x, y, col, true);
-  
-  // Add subtle time source indicator in bottom right corner
-  if (usingMqttTime) {
-    // Green on recycle days, royal blue otherwise
-    if (isRecycleDay(timeinfo)) {
-      pset(31, 7, CRGB(0, 255, 0)); // Green pixel for MQTT time on recycle days
-    } else {
-      pset(31, 7, CRGB(0, 64, 255)); // Royal blue pixel for MQTT time
-    }
-  } else {
-    pset(31, 7, CRGB(0, 100, 255)); // Blue pixel for NTP time
-  }
-}
-
-// Draw calendar page with month and date
-void drawCalendar() {
-  struct tm timeinfo;
-  bool usingMqttTime;
-  if (!getCurrentTime(&timeinfo, &usingMqttTime)) {
-    return;
-  }
-
-  CRGB col = isNight(timeinfo) ? COLOR_NIGHT : COLOR_DAY;
-  FastLED.setBrightness(currentBrightness);
-
-  clearAll();
-
-  // Get month name
-  char monthName[4];
-  strcpy_P(monthName, (char*)pgm_read_ptr(&(MONTH_NAMES[timeinfo.tm_mon])));
-  
-  // Draw month on left side, vertically centered
-  drawSmallString(monthName, 1, 2, col);
-
-  // Draw date on right side
-  int day = timeinfo.tm_mday;
-
-  if (day >= 10) {
-    // Two digits: position on right side of 32-pixel display
-    int x = 19;  // Start position for two 6-wide digits + spacing
-    drawLargeGlyph(day / 10, x, 1, col);
-    drawLargeGlyph(day % 10, x + 7, 1, col);
-  } else {
-    // Single digit: position on right side
-    int x = 22; // Center single 6-wide digit on right side
-    drawLargeGlyph(day, x, 1, col);
-  }
+  drawLargeGlyph(minute % 10, x, y, col);
 }
 
 // Draw weather page with temperature and icon
 void drawWeather() {
   struct tm timeinfo;
-  bool usingMqttTime;
-  if (!getCurrentTime(&timeinfo, &usingMqttTime)) {
-    // No MQTT time available, show error message
+  if (!getCurrentTime(&timeinfo)) {
     clearAll();
-    CRGB col = COLOR_DAY;
-    FastLED.setBrightness(currentBrightness);
-    drawSmallString("NO TIME", 6, 2, col);
+    drawSmallString("NO TIME", 6, 2, COLOR_DAY);
     return;
   }
 
   CRGB col = isNight(timeinfo) ? COLOR_NIGHT : COLOR_DAY;
-  FastLED.setBrightness(currentBrightness);
 
   clearAll();
 
@@ -987,7 +845,7 @@ void drawWeather() {
   // Use new temperature color mapping with night mode detection and brightness compensation
   CRGB tempColor = tempToColorF(temperature, isNight(timeinfo), currentBrightness);
 
-  // Use large 6x7 digits for temperature with better spacing
+  // Use large 6x8 digits for temperature with better spacing
   int x = 1;
   int y = 1;
 
@@ -1005,24 +863,24 @@ void drawWeather() {
 
   // Draw temperature digits with color scaling
   if (absTemp >= 100) {
-    drawLargeGlyph(absTemp / 100, x, y, tempColor, true);
+    drawLargeGlyph(absTemp / 100, x, y, tempColor);
     x += DIGIT_SPACING;
-    drawLargeGlyph((absTemp / 10) % 10, x, y, tempColor, true);
+    drawLargeGlyph((absTemp / 10) % 10, x, y, tempColor);
     x += DIGIT_SPACING;
-    drawLargeGlyph(absTemp % 10, x, y, tempColor, true);
+    drawLargeGlyph(absTemp % 10, x, y, tempColor);
     x += 6;
   } else if (absTemp >= 10) {
-    drawLargeGlyph(absTemp / 10, x, y, tempColor, true);
+    drawLargeGlyph(absTemp / 10, x, y, tempColor);
     x += DIGIT_SPACING;
-    drawLargeGlyph(absTemp % 10, x, y, tempColor, true);
+    drawLargeGlyph(absTemp % 10, x, y, tempColor);
     x += 6;
   } else {
-    drawLargeGlyph(absTemp, x, y, tempColor, true);
+    drawLargeGlyph(absTemp, x, y, tempColor);
     x += 6;
   }
   
   // Draw degree symbol with same color as temperature
-  drawLargeDegree(x + 1, y, tempColor);  // Start at y position, +1px spacing from digits
+  drawLargeDegree(x - 1, y, tempColor);  // Overlap 1px into last digit's trailing column
   
   // Draw weather icon on right side with custom color scheme
   uint8_t iconIndex = 1; // Default to clouds
@@ -1035,7 +893,7 @@ void drawWeather() {
   if (strcmp(weatherCondition, "Clear") == 0) {
     if (isNightWeather) {
       iconIndex = 5;  // Moon icon for clear night
-      iconColor = CRGB(200, 220, 255); // Silver-blue for moon
+      iconColor = CRGB(255, 200, 0); // Golden yellow for moon
     } else {
       iconIndex = 0;  // Sun icon for clear day
       iconColor = CRGB(255, 200, 0); // Golden yellow for sun
@@ -1082,7 +940,7 @@ void drawNotify() {
   clearAll();
 
   if (notifyScrolling) {
-    // Scrolling mode: large 5x7 font, vertically centered
+    // Scrolling mode: large 5x8 font, vertically centered
     int y = 0; // 7px tall font on 8px display, start at top
     unsigned long now = millis();
     if (now - lastScrollMs >= scrollSpeedMs) {
@@ -1129,8 +987,7 @@ void ensureWifi() {
 
   // Shorter timeout for dual-core stability (5 seconds instead of 10)
   while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 5000) {
-    // Feed watchdog during WiFi connection attempts
-    if (wdt_added) esp_task_wdt_reset();
+    esp_task_wdt_reset();
     delay(250);  // Shorter delay intervals
     Serial.print(".");
   }
@@ -1161,9 +1018,9 @@ void fetchWeatherData() {
   http.setTimeout(3000);       // 3 second timeout (shorter for dual-core stability)
   http.setConnectTimeout(2000); // 2 second connection timeout
   http.setReuse(false);        // Disable reuse to prevent connection hangs
-  if (wdt_added) esp_task_wdt_reset();   // Feed WDT before potentially long operation
+  esp_task_wdt_reset();
   int httpCode = http.GET();
-  if (wdt_added) esp_task_wdt_reset();   // Feed WDT after potentially long operation
+  esp_task_wdt_reset();
   Serial.printf("Weather API HTTP response: %d\n", httpCode);
 
   if (httpCode == HTTP_CODE_OK) {
@@ -1229,21 +1086,6 @@ void handlePageCommand(const JsonDocument& doc) {
   else if (strcmp(page, "weather") == 0) currentPage = PAGE_WEATHER;
 }
 
-// Handle manual brightness setting
-void handleBrightness(const JsonDocument& doc) {
-  uint8_t brightness = doc["brightness"] | 24;
-  brightness = constrain(brightness, 1, 255);
-  manualBrightness = brightness;
-  autoBrightnessEnabled = false; // Manual override disables auto-brightness
-}
-
-// Handle auto-brightness configuration
-void handleAutoBrightness(const JsonDocument& doc) {
-  if (doc.containsKey("enabled")) {
-    autoBrightnessEnabled = doc["enabled"];
-  }
-}
-
 // Handle general configuration settings
 void handleConfig(const JsonDocument& doc) {
   if (doc.containsKey("page_duration")) {
@@ -1285,8 +1127,7 @@ bool mqttSubscribe(const char* suffix, bool& allSubscribed) {
 void ensureMqtt() {
   if (mqtt.connected()) return;
   
-  // Feed watchdog before potentially long MQTT operations
-  if (wdt_added) esp_task_wdt_reset();
+  esp_task_wdt_reset();
   
   char cid[24];
   snprintf(cid, 24, "tc001-%llX", ESP.getEfuseMac());
@@ -1299,13 +1140,9 @@ void ensureMqtt() {
     
     bool allSubscribed = true;
     
-    // Subscribe to all topics using helper function
-    if (wdt_added) esp_task_wdt_reset();
+    // Subscribe to all topics
     mqttSubscribe("/notify", allSubscribed);
     mqttSubscribe("/page", allSubscribed);
-    mqttSubscribe("/brightness", allSubscribed);
-    mqttSubscribe("/auto_brightness", allSubscribed);
-    if (wdt_added) esp_task_wdt_reset();
     mqttSubscribe("/config", allSubscribed);
     mqttSubscribe("/weather", allSubscribed);
     mqttSubscribe("/time", allSubscribed);
@@ -1326,55 +1163,36 @@ void ensureMqtt() {
 }
 
 // MQTT message callback - routes to appropriate handlers
-void mqttCallback(char* topic, byte* payload, unsigned int len) {
-  // Feed watchdog at start of MQTT callback to prevent timeouts during processing
-  if (wdt_added) esp_task_wdt_reset();
+static char mqttJsonBuf[512];
+static StaticJsonDocument<512> mqttDoc;
 
-  // Reject oversized payloads to prevent stack overflow
-  if (len > 500) {
-    Serial.printf("MQTT payload too large (%u bytes), rejected\n", len);
+void mqttCallback(char* topic, byte* payload, unsigned int len) {
+  esp_task_wdt_reset();
+
+  if (len > 500) return;
+
+  memcpy(mqttJsonBuf, payload, len);
+  mqttJsonBuf[len] = '\0';
+
+  Serial.printf("MQTT: %s (%d bytes)\n", topic, len);
+
+  DeserializationError err = deserializeJson(mqttDoc, mqttJsonBuf);
+  if (err) {
+    Serial.printf("JSON error: %s - payload: %s\n", err.c_str(), mqttJsonBuf);
     return;
   }
 
-  char json[512];
-  memcpy(json, payload, len);
-  json[len] = '\0';
-
-  Serial.printf("✅ MQTT CALLBACK TRIGGERED - Topic: '%s', Length: %d\n", topic, len);
-  Serial.printf("📧 Raw Payload: %s\n", json);
-  
-  // Debug: Print payload as hex to see if there are hidden characters
-  Serial.print("🔍 Hex Dump: ");
-  for (unsigned int i = 0; i < len; i++) {
-    Serial.printf("%02X ", payload[i]);
-  }
-  Serial.println();
-
-  StaticJsonDocument<512> doc;
-  DeserializationError err = deserializeJson(doc, json);
-  if (err) {
-    Serial.printf("❌ MQTT JSON parse error: %s\n", err.c_str());
-    Serial.printf("📝 Failed payload: '%s'\n", json);
-    return; // Exit immediately on JSON parse error (no fixing attempts)
-  }
-  
-  Serial.println("✅ JSON parsed successfully!");
-
   // Route to handlers using suffix matching (zero-allocation)
   if (strstr(topic, "/notify")) {
-    handleNotify(doc);
+    handleNotify(mqttDoc);
   } else if (strstr(topic, "/page")) {
-    handlePageCommand(doc);
-  } else if (strstr(topic, "/auto_brightness")) {
-    handleAutoBrightness(doc);
-  } else if (strstr(topic, "/brightness")) {
-    handleBrightness(doc);
+    handlePageCommand(mqttDoc);
   } else if (strstr(topic, "/config")) {
-    handleConfig(doc);
+    handleConfig(mqttDoc);
   } else if (strstr(topic, "/weather")) {
     fetchWeatherData();
   } else if (strstr(topic, "/time")) {
-    handleTimeCommand(doc);
+    handleTimeCommand(mqttDoc);
   }
 }
 
@@ -1389,9 +1207,7 @@ void renderTask(void *pvParameters) {
   
   while (true) {
     unsigned long currentMs = millis();
-    
-    // Feed watchdog for render task
-    if (wdt_added) esp_task_wdt_reset();
+    esp_task_wdt_reset();
     
     // Handle colon blinking for clock (500ms intervals)
     if (currentMs - lastBlinkMs > 500) {
@@ -1412,11 +1228,8 @@ void renderTask(void *pvParameters) {
       
       // Take display mutex for thread-safe rendering
       if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(10))) {
-        // Handle ambient sensor reading (only if auto-brightness enabled)
-        if (autoBrightnessEnabled && (currentMs - lastAmbientReadMs > AMBIENT_READ_INTERVAL_MS)) {
-          lastAmbientReadMs = currentMs;
-          updateBrightness();
-        }
+        // Update brightness based on time of day (checked every frame, cheap comparison)
+        updateBrightness();
         
         // Draw current page or notification
         if (notifyActive) {
@@ -1453,34 +1266,19 @@ void networkTask(void *pvParameters) {
   Serial.println("Network task started on Core 0");
   
   while (true) {
-    // Feed watchdog for network task at start of loop
-    if (wdt_added) esp_task_wdt_reset();
-    
-    // Handle network operations with timeouts and watchdog feeds
+    esp_task_wdt_reset();
+
     ensureWifi();
-    
-    // Feed watchdog after WiFi operations
-    if (wdt_added) esp_task_wdt_reset();
-    
     ensureMqtt();
-    
-    // Feed watchdog after MQTT connection operations
-    if (wdt_added) esp_task_wdt_reset();
-    
     mqtt.loop();
-    
-    // Feed watchdog after MQTT loop processing
-    if (wdt_added) esp_task_wdt_reset();
-    
+
+    esp_task_wdt_reset();
+
     unsigned long currentMs = millis();
-    
-    // Handle weather updates (non-blocking with timeout)
     if (currentMs - lastWeatherCheck > weatherUpdateIntervalMs) {
       lastWeatherCheck = currentMs;
       fetchWeatherData();
-      
-      // Feed watchdog after weather API call
-      if (wdt_added) esp_task_wdt_reset();
+      esp_task_wdt_reset();
     }
     
     // Network task runs every 100ms to balance responsiveness and CPU usage
@@ -1501,9 +1299,8 @@ void setup() {
   Serial.println("Showing watchdog boot icon...");
   drawWatchdogBootIcon();
   
-  // Set normal brightness
+  // Set initial brightness
   updateBrightness();
-  FastLED.setBrightness(currentBrightness);
   clearAll();
   FastLED.show();
   Serial.printf("LED matrix initialized with brightness: %d\n", currentBrightness);
@@ -1525,10 +1322,6 @@ void setup() {
     Serial.print(".");
   }
   Serial.println(" Network ready!");
-
-  // NTP removed for performance - time sync now via MQTT only
-  Serial.println("Time sync via MQTT only (NTP disabled for performance)");
-  // setupTime(); // Commented out - using MQTT time instead
 
   // Configure MQTT
   Serial.printf("Configuring MQTT for server %s:%d\n", MQTT_HOST, MQTT_PORT);
@@ -1553,7 +1346,7 @@ void setup() {
   if (!wdt_added) {
     Serial.println("Configuring watchdog timer for dual-core tasks...");
     esp_task_wdt_config_t twdt_config = {
-      .timeout_ms = 30000,  // 30 second timeout (more lenient for stability)
+      .timeout_ms = 15000,  // 15 second timeout
       .idle_core_mask = 0,  // Don't watch idle cores (prevents false triggers)
       .trigger_panic = true
     };

@@ -22,6 +22,7 @@ Author: Claude Code Assistant
 License: MIT
 """
 
+import os
 import time
 import json
 import paho.mqtt.client as mqtt
@@ -39,22 +40,22 @@ try:
 except ImportError:
     MQTT_V2 = False
 
-# Configuration - Update these to match your setup
-MQTT_HOST = "192.168.1.100"    # Your MQTT broker IP address
-MQTT_PORT = 1883               # Standard MQTT port
-MQTT_BASE = "tc001"            # Base topic for all MQTT messages (match config.h)
-MQTT_USERNAME = None           # Set if your broker requires authentication
-MQTT_PASSWORD = None           # Set if your broker requires authentication
+# Configuration - env vars override defaults (for Docker), fallback to hardcoded values
+MQTT_HOST = os.environ.get("MQTT_HOST", "192.168.1.100")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_BASE = os.environ.get("MQTT_BASE", "tc001")
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")
 
 # Time publishing settings
 TIME_PUBLISH_INTERVAL = 60     # Publish time every 60 seconds
 CLIENT_ID = "tc001-time-publisher"
-TIMEZONE = "America/Denver"    # Mountain Time (MST/MDT with automatic DST)
+TIMEZONE = os.environ.get("TZ", "America/Denver")
 
 # OpenWeather settings (for freeze warnings)
-OPENWEATHER_API_KEY = "your_openweather_api_key_here"
-OPENWEATHER_LAT = "YOUR_LATITUDE"
-OPENWEATHER_LON = "YOUR_LONGITUDE"
+OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "your_openweather_api_key_here")
+OPENWEATHER_LAT = os.environ.get("OPENWEATHER_LAT", "YOUR_LATITUDE")
+OPENWEATHER_LON = os.environ.get("OPENWEATHER_LON", "YOUR_LONGITUDE")
 WEATHER_CHECK_INTERVAL = 1800  # Check every 30 minutes
 FREEZE_THRESHOLD_F = 32.0      # Alert below this temperature
 FREEZE_ALERT_INTERVAL = 600    # Re-alert every 10 minutes while freezing
@@ -82,6 +83,8 @@ SPORTS_LOSS_COLOR = "FF0000"    # Red for losses
 RECYCLE_START_DATE = datetime(2025, 11, 17)  # First recycling Monday
 RECYCLE_INTERVAL_DAYS = 14
 RECYCLE_REMINDER_HOUR = 18     # Start reminding at 6 PM Sunday
+RECYCLE_REMINDER_END_HOUR = 21 # Stop reminding at 9 PM Sunday
+RECYCLE_MONDAY_END_HOUR = 12   # Also remind Monday morning, stop at noon
 RECYCLE_ALERT_INTERVAL = 600   # Remind every 10 minutes
 
 # Logging setup
@@ -105,10 +108,14 @@ class TimePublisher:
         self.client.on_disconnect = self.on_disconnect
         self.client.on_publish = self.on_publish
         self.connected = False
+        self._loop_started = False
 
         # Set authentication if configured
         if MQTT_USERNAME and MQTT_PASSWORD:
             self.client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+        # Automatic reconnect with backoff (paho handles retry internally)
+        self.client.reconnect_delay_set(min_delay=2, max_delay=30)
 
         # Initialize timezone
         self.timezone = pytz.timezone(TIMEZONE)
@@ -130,7 +137,7 @@ class TimePublisher:
         self.last_game_state = {}    # Track state to detect changes
         self.notified_final = set()  # Don't repeat final score alerts
         self.win_celebration = {}    # {game_id: {"msg": str, "until": timestamp, "last_alert": timestamp}}
-    
+
     def on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
             self.connected = True
@@ -139,59 +146,61 @@ class TimePublisher:
         else:
             logger.error(f"Failed to connect to MQTT broker. Return code: {rc}")
             self.connected = False
-    
+
     def on_disconnect(self, client, userdata, rc, properties=None):
         self.connected = False
         logger.warning(f"Disconnected from MQTT broker. Return code: {rc}")
-    
+
     def on_publish(self, client, userdata, mid, properties=None, reasonCode=None):
         logger.debug(f"Message published successfully (mid: {mid})")
-    
+
     def connect(self):
         try:
             logger.info(f"Connecting to MQTT broker {MQTT_HOST}:{MQTT_PORT}...")
             self.client.connect(MQTT_HOST, MQTT_PORT, 60)
-            self.client.loop_start()
-            
+            if not self._loop_started:
+                self.client.loop_start()
+                self._loop_started = True
+
             # Wait for connection
             wait_time = 0
             while not self.connected and wait_time < 10:
                 time.sleep(0.5)
                 wait_time += 0.5
-            
+
             if not self.connected:
                 logger.error("Failed to connect within timeout period")
                 return False
-            
+
             return True
         except Exception as e:
             logger.error(f"Connection error: {e}")
             return False
-    
+
     def get_local_time(self):
         """Get current time in configured timezone"""
         utc_now = datetime.now(pytz.UTC)
         local_time = utc_now.astimezone(self.timezone)
         return local_time
-    
+
     def publish_time(self):
         if not self.connected:
             logger.warning("Not connected to MQTT broker, skipping time publish")
             return False
-        
+
         try:
             # Get current Unix timestamp
             unix_time = int(time.time())
-            
+
             # Create JSON payload
             payload = {
                 "unix_time": unix_time
             }
-            
+
             # Publish to topic with MQTT retention for immediate time sync on clock reboot
             topic = f"{MQTT_BASE}/time"
             result = self.client.publish(topic, json.dumps(payload), qos=1, retain=True)
-            
+
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
                 # Log with human-readable time for verification
                 local_time = self.get_local_time()
@@ -201,11 +210,11 @@ class TimePublisher:
             else:
                 logger.error(f"Failed to publish time message. Return code: {result.rc}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Error publishing time: {e}")
             return False
-    
+
     def send_notification(self, text, color="FFFF00", speed=80, repeat=2):
         """Send a scrolling notification to the clock"""
         if not self.connected:
@@ -303,16 +312,22 @@ class TimePublisher:
             time.sleep(2)  # Small gap between multiple alerts
 
     def is_recycle_reminder_time(self):
-        """Check if it's Sunday evening before a recycling Monday"""
+        """Check if it's Sunday evening or Monday morning before recycling pickup"""
         local_time = self.get_local_time()
-        # Must be Sunday and after the reminder hour
-        if local_time.weekday() != 6:  # 6 = Sunday
+        weekday = local_time.weekday()
+
+        if weekday == 6:  # Sunday: remind 6 PM - 9 PM
+            if local_time.hour < RECYCLE_REMINDER_HOUR or local_time.hour >= RECYCLE_REMINDER_END_HOUR:
+                return False
+            recycle_day = local_time.date() + timedelta(days=1)
+        elif weekday == 0:  # Monday: remind until noon
+            if local_time.hour >= RECYCLE_MONDAY_END_HOUR:
+                return False
+            recycle_day = local_time.date()
+        else:
             return False
-        if local_time.hour < RECYCLE_REMINDER_HOUR:
-            return False
-        # Check if tomorrow (Monday) is a recycling day
-        tomorrow = local_time.date() + timedelta(days=1)
-        days_diff = (tomorrow - RECYCLE_START_DATE.date()).days
+
+        days_diff = (recycle_day - RECYCLE_START_DATE.date()).days
         return days_diff >= 0 and days_diff % RECYCLE_INTERVAL_DAYS == 0
 
     def send_recycle_reminder(self):

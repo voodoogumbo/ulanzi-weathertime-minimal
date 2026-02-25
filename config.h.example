@@ -7,13 +7,11 @@
   3. Never commit the real config.h file to public repositories!
   
   MQTT Topics (automatically created):
-  - {MQTT_BASE}/notify      - Show notification: {"text":"Hello", "color":"FF0000", "duration":5}
+  - {MQTT_BASE}/time        - REQUIRED: Time sync: {"unix_time":1640995200}
+  - {MQTT_BASE}/notify      - Show notification: {"text":"Hello", "color":"FF0000", "speed":80, "repeat":2}
   - {MQTT_BASE}/page        - Change page: {"page":"clock|weather"}
-  - {MQTT_BASE}/brightness  - Set brightness: {"brightness":50}
-  - {MQTT_BASE}/auto_brightness - Toggle auto: {"enabled":true}
   - {MQTT_BASE}/config      - Runtime config: {"page_duration":10, "rotation_enabled":true}
   - {MQTT_BASE}/weather     - Force weather update: {}
-  - {MQTT_BASE}/time        - REQUIRED: Time sync: {"unix_time":1640995200}
 */
 
 #ifndef CONFIG_H
@@ -29,6 +27,9 @@ const char* WIFI_PASSWORD = "YourWiFiPassword";
 const char* MQTT_HOST = "192.168.1.100";      // Your MQTT broker IP address
 const uint16_t MQTT_PORT = 1883;              // Standard MQTT port
 const char* MQTT_BASE = "tc001";              // Base topic for all MQTT messages
+
+/*********** OTA CONFIGURATION ***********/
+const char* OTA_PASSWORD = "your_ota_password";  // Password for over-the-air updates
 
 /*********** OPENWEATHER API CONFIGURATION ***********/
 // Get your free API key from: https://openweathermap.org/api

@@ -1,0 +1,29 @@
+services:
+  emqx:
+    image: emqx/emqx:5.8.4
+    container_name: emqx
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "18083:18083"
+    volumes:
+      - D:\Docker\data\emqx\data:/opt/emqx/data
+      - D:\Docker\data\emqx\log:/opt/emqx/log
+    environment:
+      - "EMQX_DASHBOARD__DEFAULT_PASSWORD=DraperAdmin2026"
+      - "EMQX_NODE__COOKIE=draper_secret_cookie"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  tc001-publisher:
+    build: .
+    container_name: tc001-publisher
+    restart: unless-stopped
+    depends_on:
+      - emqx
+    environment:
+      - MQTT_HOST=emqx
+      - TZ=America/Denver
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"

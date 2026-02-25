@@ -1,0 +1,149 @@
+MQTT Notification Message Scrolling in Ulanzi TC001 Firmware
+Current Firmware Behavior (No Scrolling Support)
+
+The provided custom firmware (TC001_Enhanced_SingleFile.ino) does not currently implement scrolling for MQTT notification messages. In the MQTT handler handleNotify(), the code only parses fields for text, color, and duration – there are no references to any scroll or scrollspeed fields in the JSON payload. Likewise, the drawing routine for notifications simply centers the text and truncates it if it’s too long to fit, rather than scrolling it across the LED matrix. Specifically, drawNotify() calculates the text width and if it exceeds the 32-pixel display width, the code chops off the extra characters (with a small margin) instead of scrolling them. This means that any MQTT notification text longer than the matrix width will be cut off, and the firmware as-is ignores any JSON instructions to scroll the text. In summary, the current firmware does not support MQTT-based message scrolling – it shows notifications as static, centered text (or truncated to fit), with no built-in scrolling behavior.
+
+Implementing MQTT-Based Message Scrolling
+
+To support scrolling MQTT messages on the LED matrix, the firmware needs to be extended in a few key ways. The goal is to have the option (via JSON payload) to scroll a long message across the 32×8 LED display instead of truncating it. Achieving this will involve parsing new JSON fields for scrolling directives, and animating the text across frames in the render loop. Below we break down the steps to implement this:
+
+Parsing scroll and scrollspeed Parameters
+
+First, the firmware should read any scrolling instructions from the MQTT JSON payload. In practice, this means extending handleNotify() to check for a boolean flag (e.g. scroll) and an optional speed setting (e.g. scrollspeed). For example, if the MQTT message JSON looks like:
+
+{ 
+  "text": "Long notification message...", 
+  "color": "FF00FF", 
+  "duration": 10, 
+  "scroll": true, 
+  "scrollspeed": 50 
+}
+
+
+the firmware should capture the scroll flag and scroll speed value. Currently, handleNotify ignores such fields. We would introduce new state variables (perhaps global or static within the notify handler) to store whether the current notification should scroll and how fast. For instance, a boolean notifyScrollEnabled can track if the scroll flag was true, and an integer notifyScrollSpeed (or percentage) can store the requested speed. If these fields are not present in the JSON, we can default to false (no scrolling) and a standard speed (e.g. 100% or a default delay). This way, if scroll: true and scrollspeed are included in the JSON payload, the firmware will record those and later adjust the rendering logic accordingly. (For reference, the Home Assistant AWTRIX integration expects exactly these fields to enable text scrolling and modify its speed
+github.com
+.)
+
+Animating Scrolling Text on the LED Matrix
+
+Once the firmware knows a notification should scroll, the drawing routine must animate the text across the display over time. The 32×8 LED matrix isn’t using a high-level graphics library for text – instead, the firmware uses custom functions like drawSmallString() to plot characters onto the LED array via FastLED. This means the firmware itself is responsible for moving the text. The approach is to draw the text at a varying X offset each frame, creating a marquee effect.
+
+How to implement the scrolling: rather than centering the text and truncating (as done now), we will render the full text and change the starting column over time. For example, initially you might start with the text just at the left edge (or slightly off-screen to the right for a smooth entrance), then each frame shift it left by one pixel. Over multiple frames, the text will scroll into view and continue moving left. Because the firmware’s render task already runs at ~30 FPS (updating every ~33ms), we can leverage that loop to update the text position. We might use a variable like notifyScrollOffset to represent the current horizontal offset of the text (starting at 0 or at +32 if starting off-screen). Each time the render loop runs and draws the notification, if scrolling is enabled we decrement this offset by 1 pixel (or some value based on scroll speed). By continuously redrawing the text at the new notifyScrollOffset, it will appear to move. The process continues until the text has completely scrolled through.
+
+Handling scroll speed: The scrollspeed value from JSON can determine how fast the text moves. One simple implementation is to treat this value as a percentage of a base speed. For instance, define a base scroll interval (delay) for 100% speed (say, 100 ms per pixel shift). Then adjust this interval by the percentage – e.g. if scrollspeed is 50, make the scroll move half as fast (delay ~200 ms per pixel), or if 200, move twice as fast (50 ms per pixel). In code, you could have a timer check like:
+
+// Pseudocode inside render loop
+if (notifyScrollEnabled) {
+    if (millis() - lastScrollMoveMs >= scrollIntervalMs) {
+        notifyScrollOffset--;              // move text one pixel to the left
+        lastScrollMoveMs = millis();
+    }
+}
+
+
+Here, scrollIntervalMs would be calculated from the notifyScrollSpeed (for example, scrollIntervalMs = baseInterval * 100 / notifyScrollSpeedPercent). Using this logic, a lower percentage (slower speed) yields a longer delay between moves, and a higher percentage (faster) yields a shorter delay. The net effect is that scrollspeed from the MQTT payload directly influences how smooth or fast the text scrolls across the matrix.
+
+Resetting and boundaries: We should also manage what happens when the text has scrolled completely. A practical approach is to reset the scroll offset or stop scrolling when the message has fully traversed. For instance, if notifyScrollOffset becomes -(textWidth) (meaning the entire text has moved off the left side), you could either loop it back to the starting position if time remains, or simply leave it (the screen would be blank once the text passes through). The AWTRIX system allows repeating the scroll a certain number of times or for a duration
+github.com
+github.com
+, but for a simpler implementation you might choose to repeat until the notification’s duration expires. In any case, ensure that when a new notification arrives (or notifyActive is reset), you initialize the offset back to the start so that each new message scrolls from the beginning.
+
+Scrolling: Firmware vs. LED Library Capabilities
+
+Because this firmware uses a low-level approach (FastLED with custom drawing functions) rather than a high-level LED matrix library, the scrolling behavior must be handled in the firmware code itself. There isn’t a built-in scroll feature being utilized from a library like Adafruit_GFX or an LEDMatrix class – the code manually sets pixels via pset() and draws characters via custom fonts. Libraries such as Adafruit NeoMatrix or LEDMatrix could facilitate text rendering, but even with those, you typically animate text by changing coordinates frame-by-frame (the library won’t automatically scroll long text for you unless you implement it). In this case, the rendering function drawNotify() is relatively simple and doesn’t inherently support scrolling; it just blits the string at a given position. Therefore, scrolling needs to be implemented manually in the firmware’s logic.
+
+It’s worth noting that delegating scrolling to a library would require using a different drawing approach. For example, some matrix libraries (like PxMatrix or LEDMatrix with the MD_Parola text library) provide marquee text routines, but integrating those would be a significant change. Given that the current firmware already manages drawing and timing, the most straightforward path is to update the existing code to handle scrolling. In summary, the firmware itself should control the scroll by updating the text position over time, rather than expecting the LED library to do it. This gives the developer full control over speed and behavior, at the cost of a bit of extra code – which is exactly what we’ll add.
+
+Code Changes to Enable Scrolling (Actionable Suggestions)
+
+To make MQTT notifications scroll on the Ulanzi TC001’s LED display, consider the following code modifications:
+
+Define new state variables for scrolling – add globals or static variables to track scroll status, speed, and position. For example:
+
+// Global variables for notification scrolling state
+bool notifyScrollEnabled = false;
+int notifyScrollOffset = 0;
+uint8_t notifyScrollSpeedPercent = 100;  // 100% = normal speed
+unsigned long lastScrollMoveMs = 0;
+
+
+These will keep track of whether the current notification should scroll, how far it’s offset, and timing for scroll speed. Initializing notifyScrollEnabled to false by default ensures normal (non-scrolling) notifications behave as before.
+
+Parse scroll and scrollspeed in handleNotify() – update the MQTT notify handler to set the above variables based on JSON input. For example:
+
+void handleNotify(const JsonDocument& doc) {
+  notifyText = doc["text"].as<const char*>();
+  const char* hex = doc["color"] | "FFFF00";
+  unsigned long v = strtoul(hex, nullptr, 16);
+  notifyColor = CRGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+  uint16_t dur = doc["duration"] | 4;
+  notifyEndMs = millis() + dur * 1000UL;
+  
+  // NEW: read scrolling parameters if present
+  notifyScrollEnabled = doc["scroll"] | false;
+  notifyScrollSpeedPercent = doc["scrollspeed"] | 100;
+  notifyScrollOffset = 0;            // reset scroll position for new message
+  lastScrollMoveMs = millis();       // reset timing reference
+  
+  notifyActive = true;
+}
+
+
+In this snippet, we use doc["scroll"] | false to default to false if the key isn’t provided, and similarly default scrollspeed to 100 (meaning 100% speed). We also reset the scroll offset to 0 at the start of each new notification. (If you prefer the text to start just off-screen and scroll in, you could set notifyScrollOffset = MW (32) so the text begins at the far right.) The lastScrollMoveMs is set so we can begin timing the scroll intervals.
+
+Modify drawNotify() to handle scrolling – inside the drawing function, use the notifyScrollOffset when positioning text. If scrolling is enabled and the text is wider than the display, ignore the old truncation logic and draw the full text starting at the current offset. For example:
+
+void drawNotify() {
+  clearAll();
+  int displayWidth = MW;
+  int displayHeight = MH;
+  int y = (displayHeight - 5) / 2;        // vertical centering (y ~1)
+  if (y < 0) y = 0;
+  
+  int textWidth = getSmallStringWidth(notifyText);
+  if (notifyScrollEnabled && textWidth > displayWidth) {
+    // Draw scrolling text at current offset
+    drawSmallString(notifyText, notifyScrollOffset, y, notifyColor);
+  } else {
+    // No scrolling: center text normally, with overflow protection
+    int x = (displayWidth - textWidth) / 2;
+    if (x < 0) x = 0;
+    String displayText = notifyText;
+    if (textWidth > displayWidth - 2) {
+      // Truncate to fit (existing behavior for long text without scroll)
+      int maxChars = (displayWidth - 2) / 4;
+      if (displayText.length() > maxChars) {
+        displayText = displayText.substring(0, maxChars);
+      }
+    }
+    drawSmallString(displayText, x, y, notifyColor);
+  }
+}
+
+
+In this updated drawNotify(), when notifyScrollEnabled is true, we simply draw the entire notifyText at the horizontal offset notifyScrollOffset. The drawSmallString function will automatically skip drawing any characters that fall outside the screen (because pset() checks bounds), so if notifyScrollOffset is negative (text shifted left) or positive (text shifted right), the off-screen portions are gracefully ignored. If scrolling is not enabled (or the text actually fits on screen), we fall back to the original centering and truncation logic.
+
+Animate the scroll in the render loop – the render task already calls drawNotify() repeatedly while a notification is active. We just need to update notifyScrollOffset on each frame (or at intervals based on speed). We can do this in the main render loop right after drawing, or incorporate it into drawNotify(). A simple approach is to put it in the loop condition where notifications are handled, for example:
+
+// In renderTask loop, inside the notifyActive branch:
+if (notifyActive) {
+    drawNotify();
+    if (notifyScrollEnabled && millis() - lastScrollMoveMs > (100 * 100UL / notifyScrollSpeedPercent)) {
+        notifyScrollOffset--;           // move text 1 pixel to the left
+        lastScrollMoveMs = millis();
+    }
+    if ((long)(currentMs - notifyEndMs) >= 0) {
+        notifyActive = false;
+    }
+}
+
+
+This code will move the text one pixel after a delay determined by scrollspeed: here we used the formula scrollInterval = 100 * 100 / scrollSpeed% milliseconds as discussed (so at 100% speed, that’s 100ms per pixel shift; at 50% it becomes 200ms, at 200% it becomes 50ms, etc.). You can adjust the base value (100 ms in this example) to fine-tune how fast “100%” feels. The check ensures that we only shift the text when the interval has elapsed, to control the scroll rate. The rest of the loop remains the same, including turning off notifyActive when the duration expires.
+
+Optional: If you want the text to continuously scroll even if it disappears off the left edge, you can detect when it’s fully scrolled out (e.g. notifyScrollOffset <= -textWidth) and reset notifyScrollOffset to displayWidth to loop the message. This would make the message wrap around and scroll again until the time is up. Implementing such a wrap is not strictly necessary unless you want repeating marquees, but it’s a possible enhancement.
+
+By applying the changes above, MQTT notifications with "scroll": true will smoothly scroll across the LED matrix, and the "scrollspeed" value will control the scrolling velocity. The rendering function supports it by drawing the text at the given offset each frame, and the firmware’s main loop drives the animation. All other behavior (notifications with no scroll flag, or short texts) will remain unchanged except that they now won’t be unnecessarily truncated. This makes the TC001 display behave more like an AWTRIX/LaMetric style display, showing long messages in a marquee fashion rather than cutting them off.
+
+Sources: The analysis is based on the provided TC001_Enhanced_SingleFile.ino firmware code, which shows no existing scroll handling. The implementation approach is informed by typical LED matrix scrolling techniques and the AWTRIX 3 blueprint documentation (which defines the scroll and scrollSpeed parameters)
+github.com
+. These changes would enable the Ulanzi TC001’s custom firmware to respect MQTT instructions for scrolling text and thus display longer messages in a readable way.

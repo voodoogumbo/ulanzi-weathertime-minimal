@@ -2,7 +2,13 @@
 
 A feature-rich smart clock firmware for the Ulanzi TC001 32x8 LED matrix with AWTRIX-style display, scrolling notifications, live BYU sports scores, NWS weather alerts, and MQTT control.
 
-## 🚀 What's New (Feb 2026)
+## 🚀 What's New
+
+### Latest Additions
+- 🔔 **Hourly Chime**: Two-note C5→E5 buzzer chime on the hour (daytime only)
+- 🔄 **OTA Updates**: Wireless firmware updates with password protection and visual progress
+- 🎄 **Christmas Mode**: Auto-activates Dec 20-26 with themed clock, tree icon, and periodic scroll
+- 🏈 **BYU Logo Mode**: Notifications starting with "BYU" auto-prepend the full 16x8 oval logo
 
 ### Firmware Optimizations
 - ⚡ **Cached Recycling Check**: Was 60 `mktime()` calls/sec, now rechecks once per hour
@@ -52,11 +58,20 @@ A feature-rich smart clock firmware for the Ulanzi TC001 32x8 LED matrix with AW
 - **Scrolling Notifications**: Long text auto-scrolls with configurable speed/repeat
 - **Payload Protection**: 500-byte cap prevents stack overflow from malformed messages
 
+### 🔔 Hourly Chime
+- **Two-Note Chime**: C5 → E5 buzzer chime on the hour (GPIO15 piezo)
+- **Daytime Only**: Active 6:30 AM – 10:00 PM (respects night mode)
+- **Non-Blocking**: State-machine driven, never stalls the display
+
+### 🔄 OTA Updates
+- **ArduinoOTA**: Wireless firmware updates over WiFi (no USB needed after first flash)
+- **Password Protected**: Configurable OTA password in `config.h`
+- **Visual Progress**: "BEEP" at start, "BOOP" at 50% on the display
+
 ### 🔧 Architecture
 - **Dual-Core FreeRTOS**: Core 1 renders, Core 0 handles networking (no scroll stutter)
-- **30-Second Watchdog**: Prevents hangs with task-level monitoring
+- **15-Second Watchdog**: Task-level monitoring (idle cores excluded to prevent false triggers)
 - **Adaptive FPS**: 10 FPS for static display, 20 FPS during scroll animations
-- **Task Resurrection**: Main loop auto-restarts crashed render/network tasks
 - **No Arduino String**: Fixed buffers eliminate heap fragmentation over weeks of uptime
 
 ## 🛠️ Hardware
@@ -83,6 +98,7 @@ const char* WIFI_SSID     = "YourWiFiNetwork";
 const char* WIFI_PASSWORD = "YourWiFiPassword";
 const char* MQTT_HOST     = "192.168.1.100";
 const char* OPENWEATHER_API_KEY = "your_api_key_here";
+const char* OTA_PASSWORD     = "your_ota_password";
 const char* OPENWEATHER_LAT = "YOUR_LATITUDE";
 const char* OPENWEATHER_LON = "YOUR_LONGITUDE";
 ```
@@ -101,7 +117,7 @@ CPU Frequency:    240MHz
 Flash Frequency:  80MHz
 Flash Mode:       QIO
 Flash Size:       4MB (32Mb)
-Partition Scheme: Default 4MB with spiffs (1.2MB APP/1.5MB SPIFFS)
+Partition Scheme: Default 4MB with spiffs (1.9MB APP/190KB SPIFFS)
 Core Debug Level: None
 PSRAM:            Disabled
 ```
@@ -172,6 +188,8 @@ mosquitto_pub -h BROKER -t "tc001/notify" -m '{"text":"Your message here","color
 | `speed` | int | `80` | Milliseconds per pixel shift (lower = faster scroll) |
 | `repeat` | int | `2` | Number of full scroll loops |
 
+**BYU Mode**: Notifications starting with `"BYU"` automatically prepend a 16x8 BYU oval logo with white Y on royal blue.
+
 **Windows cmd.exe example:**
 ```cmd
 "C:\Program Files\mosquitto\mosquitto_pub.exe" -h 192.168.1.100 -t "tc001/notify" -m "{\"text\":\"Hello World\",\"color\":\"00FF00\"}"
@@ -190,6 +208,17 @@ mosquitto_pub -h BROKER -t "tc001/page" -m '{"page":"weather"}'
 mosquitto_pub -h BROKER -t "tc001/brightness" -m '{"brightness":100}'
 mosquitto_pub -h BROKER -t "tc001/auto_brightness" -m '{"enabled":true}'
 ```
+
+### 🎄 Christmas
+```bash
+# Trigger a "MERRY CHRISTMAS" scroll in alternating green/red
+mosquitto_pub -h BROKER -t "tc001/christmas" -m '{"scroll":true}'
+```
+
+During Dec 20-26, the clock automatically enters Christmas mode:
+- Clock digits alternate green/red with a gold colon
+- Weather icon replaced by a decorated Christmas tree
+- "MERRY CHRISTMAS" scrolls every 10 minutes
 
 ### ⚙️ Configuration
 ```bash

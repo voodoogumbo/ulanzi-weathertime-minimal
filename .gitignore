@@ -33,3 +33,6 @@ Desktop.ini
 
 # Arduino IDE
 *.autosave
+
+# Claude Code
+.claude/

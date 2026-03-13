@@ -68,7 +68,14 @@ A feature-rich smart clock firmware for the Ulanzi TC001 32x8 LED matrix with AW
 - **Password Protected**: Configurable OTA password in `config.h`
 - **Visual Progress**: "BEEP" at start, "BOOP" at 50% on the display
 
+### 🔐 MQTT TLS Encryption (Optional)
+- **WiFiClientSecure**: Drop-in encrypted connection to MQTT broker
+- **Disabled by Default**: Set `MQTT_USE_TLS 1` in config.h to enable
+- **CA Certificate**: Supply PEM cert for full verification, or leave empty for `setInsecure()` mode
+- **Authentication**: Optional `MQTT_USER`/`MQTT_PASS` for broker auth (works with or without TLS)
+
 ### 🔧 Architecture
+- **Modular Design**: .h/.cpp module pairs (11 modules) compiled by Arduino IDE automatically
 - **Dual-Core FreeRTOS**: Core 1 renders, Core 0 handles networking (no scroll stutter)
 - **15-Second Watchdog**: Task-level monitoring (idle cores excluded to prevent false triggers)
 - **Adaptive FPS**: 10 FPS for static display, 20 FPS during scroll animations
@@ -94,13 +101,15 @@ cp config.h.example config.h
 
 ### 2. Edit `config.h`
 ```cpp
-const char* WIFI_SSID     = "YourWiFiNetwork";
-const char* WIFI_PASSWORD = "YourWiFiPassword";
-const char* MQTT_HOST     = "192.168.1.100";
-const char* OPENWEATHER_API_KEY = "your_api_key_here";
-const char* OTA_PASSWORD     = "your_ota_password";
-const char* OPENWEATHER_LAT = "YOUR_LATITUDE";
-const char* OPENWEATHER_LON = "YOUR_LONGITUDE";
+#define WIFI_SSID       "YourWiFiNetwork"
+#define WIFI_PASSWORD   "YourWiFiPassword"
+#define MQTT_HOST       "192.168.1.100"
+#define MQTT_PORT       1883
+#define MQTT_BASE       "tc001"
+#define OTA_PASSWORD    "your_ota_password"
+#define OPENWEATHER_API_KEY "your_api_key_here"
+#define OPENWEATHER_LAT "YOUR_LATITUDE"
+#define OPENWEATHER_LON "YOUR_LONGITUDE"
 ```
 
 ### 3. Install Arduino Libraries
@@ -190,6 +199,8 @@ mosquitto_pub -h BROKER -t "tc001/notify" -m '{"text":"Your message here","color
 
 **BYU Mode**: Notifications starting with `"BYU"` automatically prepend a 16x8 BYU oval logo with white Y on royal blue.
 
+**LSU Mode**: Notifications starting with `"LSU"` automatically prepend a 16x8 tiger eye logo in purple, gold, and white.
+
 **Windows cmd.exe example:**
 ```cmd
 "C:\Program Files\mosquitto\mosquitto_pub.exe" -h 192.168.1.100 -t "tc001/notify" -m "{\"text\":\"Hello World\",\"color\":\"00FF00\"}"
@@ -232,9 +243,9 @@ mosquitto_pub -h BROKER -t "tc001/config" -m '{"weather_update_minutes":30}'
 mosquitto_pub -h BROKER -t "tc001/time" -m '{"unix_time":1640995200}'
 ```
 
-## 🏈 BYU Sports Integration
+## 🏈 Sports Integration
 
-The Python script monitors ESPN's free API for BYU Cougars men's basketball and football:
+The Python script monitors NCAA and ESPN APIs for live scores from tracked teams:
 
 | Situation | Display | Color | Frequency |
 |-----------|---------|-------|-----------|
@@ -243,6 +254,15 @@ The Python script monitors ESPN's free API for BYU Cougars men's basketball and 
 | Score change | Immediate update | Blue | Instant |
 | BYU wins | `BYU WINS 85 71 VS ARIZONA` | Green | Every 10 min for 1 hour |
 | BYU loss | `BYU LOSS 60 74 VS ARIZONA` | Red | Once (we don't dwell on it) |
+
+### LSU Baseball
+
+| Situation | Display | Color | Frequency |
+|-----------|---------|-------|-----------|
+| Game day | `LSU VS OLE MISS 7PM` | Purple | Hourly |
+| Live game | `LSU 5 OLE MISS 3 T7` | Purple | Every 5 min + on score changes |
+| LSU wins | `LSU WINS 5 3 VS OLE MISS` | Green | Every 10 min for 1 hour |
+| LSU loss | `LSU LOSS 3 5 VS OLE MISS` | Red | Once |
 
 Polling adapts automatically: 30 min between games, 2 min during live games.
 
@@ -297,6 +317,30 @@ script:
 
 **Upload tip**: Hold middle button → plug USB → wait 3 sec → release → Upload.
 
+### Sending Test Notifications via EMQX REST API
+
+If you don't have `mosquitto_pub` installed, you can publish directly through the EMQX broker's REST API:
+
+```bash
+# 1. Get an auth token
+TOKEN=$(curl -s -X POST "http://HOGWARTS.local:18083/api/v5/login" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "YOUR_DASHBOARD_PASSWORD"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# 2. Publish a test notification
+curl -s -X POST "http://HOGWARTS.local:18083/api/v5/publish" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -d '{
+    "topic": "tc001/notify",
+    "payload": "{\"text\": \"BYU 78 GONZAGA 65\", \"color\": \"4073FF\", \"speed\": 60, \"repeat\": 2}",
+    "qos": 0
+  }'
+```
+
+**Success**: Returns `{"id":"..."}`. If you see `"no_matching_subscribers"`, the Ulanzi isn't connected — check its WiFi/MQTT.
+
 ### MQTT JSON Parse Errors
 ```
 MQTT JSON parse error: InvalidInput
@@ -309,10 +353,64 @@ Failed payload: '{text:Hello,color:00FF00}'
 - **Green** dot (bottom right): MQTT connected, recycle day
 - **Light Blue** dot (bottom right): No MQTT time (fallback)
 
+## 📁 Project Structure
+
+```
+TC001_Enhanced_SingleFile/
+  TC001_Enhanced_SingleFile.ino  Main sketch (globals, setup, loop)
+  config.h / config.h.example   User configuration (#define macros)
+  hw_config.h                   Hardware constants, pins, enums, timing
+  font_data.h / font_data.cpp   PROGMEM glyph arrays + icon bitmaps
+  display.h / display.cpp       XY(), pset(), clearAll(), updateBrightness()
+  font_render.h / font_render.cpp  drawLargeString, drawSmallString, width calculators
+  graphics.h / graphics.cpp     Weather icons, Christmas tree, BYU logo, boot icon
+  time_helpers.h / time_helpers.cpp  getCurrentTime, isNight, isRecycleDay, tempToColorF
+  pages.h / pages.cpp           drawClock, drawWeather, drawNotify
+  wifi_manager.h / wifi_manager.cpp  ensureWifi, fetchWeatherData
+  mqtt_handler.h / mqtt_handler.cpp  ensureMqtt, mqttCallback, all MQTT handlers
+  chime.h / chime.cpp           triggerChime, updateChime
+  tasks.h / tasks.cpp           renderTask, networkTask (FreeRTOS)
+```
+
+Arduino IDE compiles all `.cpp` files in the sketch folder automatically — no build config needed.
+
+## 🔐 MQTT TLS Setup
+
+TLS encryption is disabled by default. To enable:
+
+### 1. Enable in config.h
+```cpp
+#define MQTT_USE_TLS    1
+#define MQTT_USER       "your_mqtt_username"  // optional
+#define MQTT_PASS       "your_mqtt_password"  // optional
+```
+
+### 2. Choose Certificate Mode
+
+**Option A: Insecure (self-signed certs)**
+```cpp
+#define MQTT_CA_CERT    ""  // empty = setInsecure(), accepts any cert
+```
+
+**Option B: CA certificate verification**
+```cpp
+#define MQTT_CA_CERT    "-----BEGIN CERTIFICATE-----\n" \
+                        "MIID...your CA cert here...\n" \
+                        "-----END CERTIFICATE-----\n"
+```
+
+### Memory Impact
+| Resource | Without TLS | With TLS | Available |
+|----------|------------|----------|-----------|
+| Flash | ~800KB | ~880KB | 1.9MB partition |
+| RAM (handshake) | — | +40-50KB temp | ~200KB free |
+| RAM (steady) | — | +8-12KB | ~200KB free |
+
 ## 🔒 Security Notes
 
 - **Never commit `config.h`** — contains WiFi password and API keys
 - The Python script also contains API keys — keep it private
+- **Enable MQTT TLS** for encrypted credentials over the network
 - Secure your MQTT broker with authentication in production
 - ESP32 only supports 2.4GHz WiFi
 

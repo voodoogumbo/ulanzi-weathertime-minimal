@@ -8,11 +8,11 @@ services:
       - "8083:8083"
       - "18083:18083"
     volumes:
-      - D:\Docker\data\emqx\data:/opt/emqx/data
-      - D:\Docker\data\emqx\log:/opt/emqx/log
+      - ./data/emqx/data:/opt/emqx/data
+      - ./data/emqx/log:/opt/emqx/log
     environment:
-      - "EMQX_DASHBOARD__DEFAULT_PASSWORD=DraperAdmin2026"
-      - "EMQX_NODE__COOKIE=draper_secret_cookie"
+      - "EMQX_DASHBOARD__DEFAULT_PASSWORD=${EMQX_DASHBOARD_PASSWORD:-changeme}"
+      - "EMQX_NODE__COOKIE=${EMQX_NODE_COOKIE:-changeme}"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
@@ -24,6 +24,6 @@ services:
       - emqx
     environment:
       - MQTT_HOST=emqx
-      - TZ=America/Denver
+      - TZ=${TZ:-America/Denver}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"

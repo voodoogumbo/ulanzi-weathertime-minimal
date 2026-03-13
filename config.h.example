@@ -1,11 +1,11 @@
 /*
   config.h.example - Template configuration file for TC001 Enhanced Clock
-  
+
   SETUP INSTRUCTIONS:
   1. Copy this file to 'config.h' in the same directory
   2. Fill in your actual values below
   3. Never commit the real config.h file to public repositories!
-  
+
   MQTT Topics (automatically created):
   - {MQTT_BASE}/time        - REQUIRED: Time sync: {"unix_time":1640995200}
   - {MQTT_BASE}/notify      - Show notification: {"text":"Hello", "color":"FF0000", "speed":80, "repeat":2}
@@ -18,25 +18,32 @@
 #define CONFIG_H
 
 /*********** WIFI CONFIGURATION ***********/
-// Your WiFi network credentials
-const char* WIFI_SSID     = "YourWiFiNetworkName";
-const char* WIFI_PASSWORD = "YourWiFiPassword";
+#define WIFI_SSID       "YourWiFiNetworkName"
+#define WIFI_PASSWORD   "YourWiFiPassword"
 
 /*********** MQTT CONFIGURATION ***********/
-// MQTT broker settings - typically a local server like Home Assistant
-const char* MQTT_HOST = "192.168.1.100";      // Your MQTT broker IP address
-const uint16_t MQTT_PORT = 1883;              // Standard MQTT port
-const char* MQTT_BASE = "tc001";              // Base topic for all MQTT messages
+#define MQTT_HOST       "192.168.1.100"
+#define MQTT_PORT       1883
+#define MQTT_BASE       "tc001"
+#define MQTT_USER       ""          // leave empty for anonymous
+#define MQTT_PASS       ""          // leave empty for anonymous
+
+/*********** MQTT TLS CONFIGURATION ***********/
+// Set to 1 to enable TLS encryption for MQTT traffic
+// When enabled, uses WiFiClientSecure instead of WiFiClient
+#define MQTT_USE_TLS    0
+// REQUIRED when TLS enabled: PEM-encoded CA certificate for broker verification
+// Paste your CA cert as a multi-line C string literal (see config.h for format)
+#define MQTT_CA_CERT    ""  // REQUIRED: paste your CA cert PEM here
 
 /*********** OTA CONFIGURATION ***********/
-const char* OTA_PASSWORD = "your_ota_password";  // Password for over-the-air updates
+#define OTA_PASSWORD    "your_ota_password"
 
 /*********** OPENWEATHER API CONFIGURATION ***********/
 // Get your free API key from: https://openweathermap.org/api
-const char* OPENWEATHER_API_KEY = "your_openweather_api_key_here";
-
+#define OPENWEATHER_API_KEY "your_openweather_api_key_here"
 // Your location coordinates (get from https://www.latlong.net/)
-const char* OPENWEATHER_LAT = "40.7128";      // Example: New York City latitude
-const char* OPENWEATHER_LON = "-74.0060";     // Example: New York City longitude
+#define OPENWEATHER_LAT "40.7128"
+#define OPENWEATHER_LON "-74.0060"
 
 #endif // CONFIG_H

@@ -6,6 +6,9 @@
 config.h
 mqtt_time_recycling_publisher.py
 
+# Environment files with credentials
+.env
+
 # Temporary files
 *.tmp
 *.bak
